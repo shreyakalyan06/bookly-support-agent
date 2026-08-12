@@ -1,7 +1,6 @@
 # Bookly support agent
 
-A support agent for a made-up online bookshop. Built as a take-home for a
-Solutions Engineering role at Decagon.
+A support agent for a made-up online bookshop.
 
 It handles two things end to end: telling a customer where their order is, and
 starting a return. Chat only, no voice. Python, calling the Anthropic API
