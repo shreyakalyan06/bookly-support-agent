@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+traces/
+.env
+
+# macOS
+.DS_Store
+
+# Local eval output (final results are committed under evals/results/)
+*.json
+*.txt
+!evals/results/*
+!requirements.txt
