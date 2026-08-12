@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Tests for the control layer.
+Tests for the permission checks.
 
-No API key, no network. That is the point. The parts that must never fail are
-deterministic, so they get tested like ordinary software. Only the language half
-needs the statistical evaluation in run_scenarios.py.
+No API key. No internet. Nothing here talks to the AI, so these run in under a
+second and cost nothing.
 
-Drawing that line is the practical payoff of the architecture.
+That is the payoff for putting the rules in code. Ordinary Python can be tested
+the ordinary way: give it a situation, assert the answer. Same result every
+time. If these ever drop below 48 out of 48, something is genuinely broken.
+
+The AI's behaviour needs a different kind of testing, because it does not answer
+identically twice. That lives in run_scenarios.py.
 
     python evals/test_control_layer.py
 """

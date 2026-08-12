@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Interactive chat with the Bookly agent.
+Chat with the agent in a terminal.
 
-    python cli.py              normal chat
-    python cli.py --trace      show tool calls and guardrail decisions inline
+    python cli.py              just the conversation
+    python cli.py --trace      also show what the agent asked for behind the
+                               scenes, and whether it was allowed
 
---trace exists because this is a demo for a technical audience. In a real
-deployment the same data goes to the observability pipeline rather than the
-terminal.
+--trace is here because this is a demo. In a real deployment the same
+information would go to a monitoring system instead of the screen, but it is
+the same data.
 """
 
 import argparse

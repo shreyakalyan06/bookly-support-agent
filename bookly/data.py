@@ -1,11 +1,13 @@
 """
-Mock data store for Bookly.
+Pretend customer, order and policy data.
 
-In production this becomes real system calls: an order management system, a CRM
-record, a help centre. What matters is that data lives only here and every tool
-reads through it. Nothing reaches the model except as a tool return value.
+In a real deployment this would be calls out to an order system, a CRM and a
+help centre. What matters is the shape: all the data lives in one place and
+every tool reads it through here. Nothing reaches the AI except as the answer to
+a tool it asked for.
 
-Dates are relative to today so the demo behaves the same whenever it runs.
+Dates are worked out relative to today, so the demo behaves the same whenever
+someone runs it.
 """
 
 from datetime import date, timedelta
@@ -17,9 +19,10 @@ def _days_ago(n: int) -> str:
     return (TODAY - timedelta(days=n)).isoformat()
 
 
-# Customers. Email plus postcode is deliberately weak verification, but it is
-# structurally enforced. See guardrails.py. Real deployments would use existing
-# account auth or step-up verification.
+# Customers. Verification is email plus postcode, which is weak on purpose.
+# The point is not that this particular check is strong. The point is that
+# something checks, in code, before any order data can be read. A real shop
+# would use the customer's existing login instead.
 
 CUSTOMERS = {
     "CUST-1001": {
@@ -37,14 +40,15 @@ CUSTOMERS = {
 }
 
 
-# Orders, chosen to force specific behaviours:
-#   ORD-84201  delivered 6 days ago       inside return window, low value
-#   ORD-84315  in transit                 not returnable yet
-#   ORD-79930  delivered 104 days ago     outside return window
-#   ORD-84420  delivered, GBP 342.00      above auto-refund cap
-#   ORD-84501  return already in progress duplicate-refund guard
+# Orders. Each one exists to force a specific situation in the demo:
+#   ORD-84201  delivered 6 days ago       can be returned
+#   ORD-84315  still in transit           cannot be returned YET
+#   ORD-79930  delivered 104 days ago     too late to return
+#   ORD-84420  delivered, £342            too expensive to refund unsupervised
+#   ORD-84501  return already running     cannot return the same thing twice
 #
-# CUST-1001 has two open orders, so "where is my order" forces a question.
+# Priya has two orders open at once. That is deliberate: it means "where is my
+# order" has no single right answer, so the agent has to ask which one.
 
 _ORDER_FIXTURES = {
     "ORD-84201": {
@@ -133,9 +137,12 @@ _ORDER_FIXTURES = {
 }
 
 
-# Policy corpus. Each passage has a stable id, and the agent must cite one for
-# any policy claim. That is what makes grounding auditable rather than
-# aspirational.
+# The shop's written policies. Nine short passages.
+#
+# Each one has a fixed id like POL-RET-01. The agent has to quote that id
+# whenever it states a rule, which means anyone can check the answer against the
+# real text afterwards. Without it, "returns are within 30 days" is just the AI
+# saying something.
 
 POLICY_PASSAGES = [
     {
@@ -245,18 +252,21 @@ def get_order(order_id: str):
     return ORDERS.get((order_id or "").strip().upper())
 
 
-# Per-thread order state.
+# Why each test run gets its own copy of the orders
 #
-# initiate_return sets return_status so a second attempt is genuinely blocked.
-# Correct behaviour, but it makes the store stateful, and the eval runner runs
-# scenarios concurrently in one process.
+# When a return succeeds, we mark the order so a second attempt is blocked. That
+# is correct, and it is tested. But it means the order data CHANGES.
 #
-# Symptom: return-eligible-end-to-end passed exactly 1 of 3 runs, reason
-# "already in progress". Run one succeeded, mutated the shared dict, poisoned
-# the other two. A harness defect that looked like an agent failure.
+# The test runner runs scenarios in parallel to save time, and ORDERS was one
+# shared dictionary. So the first run succeeded, marked the order, and the other
+# two were told "a return is already in progress". The test came out at exactly
+# 1 out of 3, every time.
 #
-# Each thread now gets its own deep copy. In production this layer is a database
-# and the equivalent is a transaction rolled back per test.
+# It looked exactly like the agent failing. It was the test setup.
+#
+# Now each parallel worker gets its own copy and they cannot tread on each
+# other. In a real system this layer would be a database, and the equivalent fix
+# is undoing the changes after every test.
 
 import copy
 import threading

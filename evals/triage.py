@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """
-Failure triage.
-
-Reads results.json from a previous run and groups failures by cause, so you can
-tell whether the agent misbehaved or the assertion was wrong. Costs nothing, since
-it re-reads what you already paid for.
+Works out WHY tests failed, by re-reading results you already paid for.
 
     python evals/triage.py results.json
 
-Three kinds:
+When a test fails there are three possibilities, and they need different fixes:
 
-  agent bug      the agent did something a customer would object to
-  eval bug       the agent did something reasonable and the test called it wrong
-  underspecified the script gave the agent no room to do the thing
+  the agent is wrong    it did something a customer would complain about
+  the test is wrong     it did something sensible and the test disagreed
+  the script is wrong   the scripted messages gave it no chance to do the thing
 
-Only the first gets fixed in the agent. The second gets fixed in the test, on the
-record. The third is a scenario design problem.
+Only the first gets fixed in the agent. Fix the second in the test, and say so
+in a comment. The third means rewriting the scenario.
+
+Costs nothing to run, since it just re-reads the saved file.
 """
 
 import json

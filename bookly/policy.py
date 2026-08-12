@@ -1,12 +1,17 @@
 """
-Policy retrieval.
+Searching the shop's written policies.
 
-Keyword and token overlap over a small curated corpus. No vector database, and
-that is a decision rather than a shortcut. See the note at the bottom.
+The AI knows a lot about bookshops in general. Ask it about returns and it can
+produce a confident, well-written answer that has nothing to do with OUR rules.
+Fourteen days, twenty-eight, sixty; all of those are real policies somewhere.
 
-What matters is not retrieval quality. Every passage carries a stable id and the
-agent must return it when making a policy claim. That turns "do not make things
-up" from a request into something a reviewer can check afterwards.
+So it is only allowed to quote policy we hand it. This file finds the right
+passage and sends it over with a reference number like POL-RET-01. The AI must
+put that reference in its reply, which means anyone reading the conversation
+afterwards can check the answer against the actual document.
+
+The search itself is plain arithmetic: count matching words, add up a score.
+No AI involved. See the note at the bottom for why.
 """
 
 import re
@@ -27,11 +32,16 @@ def _tokenise(text: str):
 
 def _score(query: str, passage: dict) -> float:
     """
-    Weighted keyword hits plus token overlap with the passage body.
+    Score one passage against the question.
 
-    Keywords score higher because they are hand-curated intent signals. Same
-    reason a real deployment curates its help centre rather than trusting raw
-    embeddings over whatever content happens to exist.
+    Two things add up.
+
+    Hand-picked keywords are worth most: 3 points if the phrase appears in the
+    question as written, 2 if all its words turn up scattered about. These are
+    worth more because someone chose them deliberately.
+
+    Words shared with the passage text are worth 0.5 each. Weaker signal, since
+    a shared word can easily be coincidence.
     """
     q_lower = (query or "").lower()
     q_tokens = set(_tokenise(query))
@@ -51,18 +61,26 @@ def _score(query: str, passage: dict) -> float:
     return keyword_score + (overlap * 0.5)
 
 
-# Below this score, return nothing rather than the least-bad match. The most
-# consequential number in this file. It is the difference between an agent that
-# says "I don't know" and one that improvises.
+# The most important number in this file.
+#
+# Below this score we return NOTHING, rather than whatever scored highest.
+#
+# Here is why that matters. Without a cutoff there is always a least-bad match.
+# Someone asks about loyalty points, nothing really fits, and we hand over the
+# gift card passage because it scraped 0.5. Now the AI has a document about gift
+# cards, a question about loyalty points, and instructions to answer from the
+# document. It will produce something. It will read well. It will be wrong.
+#
+# "I do not know" only happens if you build for it.
 MIN_RELEVANCE = 2.0
 
 
 def search_policy(query: str, top_k: int = 3):
     """
-    Return the most relevant passages, or an empty list.
+    Return the best matching passages, or an empty list if nothing fits.
 
-    Empty is a useful result. The agent is instructed to hand off rather than
-    answer when retrieval finds nothing.
+    An empty list is a real answer, not a failure. When it happens the agent is
+    told to say it does not know and offer a human.
     """
     scored = [(_score(query, p), p) for p in POLICY_PASSAGES]
     hits = [(s, p) for s, p in scored if s >= MIN_RELEVANCE]
@@ -79,13 +97,24 @@ def search_policy(query: str, top_k: int = 3):
     ]
 
 
-# Why keyword retrieval and not embeddings
+# Why counting words instead of "proper" search
 #
-# For nine passages, embeddings add an API dependency, latency, and a similarity
-# threshold that is harder to reason about, in exchange for better paraphrase
-# handling. At a real help centre's scale, a few hundred articles, I would use
-# hybrid retrieval: BM25 for exact policy terms plus embeddings for paraphrase,
-# with reciprocal rank fusion.
+# The usual approach is embeddings: turn each passage into a long list of
+# numbers that captures its meaning, do the same to the question, and find the
+# closest. It handles rephrasing better. "How do I send this back" and "returns
+# policy" share no words but mean the same thing.
 #
-# The citation contract and the threshold rule would not change. Those are
-# architectural. The retriever is an implementation detail.
+# For nine passages that is not worth it. It means an extra API call before
+# every search, more waiting for the customer, and a similarity cutoff with no
+# obvious right value. Instead the rephrasing cases are handled by hand: note
+# that "send back" is in the keyword list below.
+#
+# A vector database would be further overkill still. Those exist to search
+# millions of vectors quickly, using a method that is deliberately approximate.
+# Nine vectors is nine sums. There is nothing to speed up.
+#
+# At a few hundred help articles I would use both: word matching for exact
+# policy terms, embeddings for rephrasing, results merged.
+#
+# What would NOT change is the reference number rule and the cutoff above.
+# Those are the design. The search underneath is swappable.

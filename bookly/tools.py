@@ -1,23 +1,30 @@
 """
-Tool definitions and handlers.
+The list of things the AI is allowed to ask for, and the code that does them.
 
-Two things about the shape of this module.
+Two halves. TOOL_SCHEMAS is the menu we hand the AI: eight jobs, each with a
+description and the information it must supply. HANDLERS is what actually runs
+when it asks.
 
-Every handler touching account data calls guardrails before doing any work, and
-returns a structured refusal if the check fails. The model gets the refusal as a
-tool result and cannot route around it, because asking was the only power it ever
-had.
+Two rules shape everything below.
 
-Tool results are structured data, not prose. The model turns them into something
-a human wants to read. Keeping those separate means system behaviour does not
-depend on the model reading a sentence correctly.
+Anything touching a customer's account or money runs the permission checks in
+guardrails.py FIRST, before doing any work. If a check says no, we send back a
+refusal. The AI cannot get round it, because asking was the only thing it could
+ever do.
+
+Handlers return data, not sentences. We send facts; the AI turns them into
+something a person wants to read. Keeping those jobs apart means the system does
+not depend on the AI reading a sentence correctly.
 """
 
 from datetime import date
 from . import catalogue, data, guardrails, policy
 from .guardrails import Decision, Session
 
-# Schemas passed to the model
+# The menu we hand the AI.
+#
+# The "description" is not documentation for us. It is the only thing telling
+# the AI when to use each tool, so it is written as instructions to it.
 
 TOOL_SCHEMAS = [
     {
@@ -182,12 +189,23 @@ TOOL_SCHEMAS = [
 ]
 
 
-# Handlers. Each returns (payload, guardrail_decision_or_None, cited_ids) so the
-# tracer records the permission decision separately from the result.
+# The handlers: what actually happens when the AI asks.
+#
+# Each returns three things:
+#   1. the answer we send back to the AI
+#   2. the permission decision, so we can log WHY something was allowed
+#   3. any policy references quoted, so we can check the AI cited them
 
 
 def _refusal(decision: Decision):
-    """A refusal is data in a consistent shape, so the model handles it predictably."""
+    """
+    Build a refusal.
+
+    We return a refusal instead of raising an error, for three reasons. The AI
+    needs to be told, and an error would never reach it. Nothing has actually
+    gone wrong, so an error would be misleading. And because every refusal has
+    the same shape, we can count them later.
+    """
     return {
         "ok": False,
         "refused": True,
@@ -292,22 +310,22 @@ def get_order(session: Session, order_id: str = "", **_):
             "order": {
                 k: v for k, v in order.items() if k != "customer_id"
             },
-            # Eligibility computed here and handed over as a fact. The model is
-            # never asked whether a date falls inside a window.
+            # We work out whether it can be returned and tell the AI the
+            # answer. We do not hand it two dates and hope it does the sums.
             "return_eligibility": {
                 "returnable": returnable.permitted,
                 "rule": returnable.rule,
                 "reason": returnable.reason,
-                # Surfaced so the agent declines gracefully rather than
-                # attempting and being refused. The refusal still holds either
-                # way. See authorise_return.
-                # Both blocking rules surfaced, not just the window.
+                # Telling the AI up front means it can decline politely
+                # instead of trying and being blocked. If it tried anyway,
+                # authorise_return would still stop it. Two safety nets.
+                # Tell the AI about both possible blockers, not just the date.
                 #
-                # v1 reported only `returnable`, so an order inside the window
-                # but above the refund ceiling looked clear. The agent would
-                # attempt it, get refused, and the customer watched the system
-                # catch itself. Surfacing the ceiling lets it explain up front
-                # that a colleague must approve.
+                # First version only mentioned the return window. So a £342
+                # order bought last week looked completely fine, the AI would
+                # try to refund it, get refused, and the customer would watch
+                # the system trip over itself. Now it knows up front and can say
+                # "a colleague needs to approve this" before trying.
                 "surfaced_constraint": (
                     returnable.rule
                     if not returnable.permitted
@@ -402,7 +420,7 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
 
 
 def _book_card(book: dict, why: str = ""):
-    """Minimal, consistent shape. This supplies facts. The model writes the prose."""
+    """One book, as facts. The AI writes the sentence around it."""
     card = {
         "book_id": book["book_id"],
         "title": book["title"],
@@ -426,20 +444,27 @@ def recommend_books(
     **_,
 ):
     """
-    Tier 0. No permission gate, because a recommendation is fully recoverable.
+    Suggest books. No permission check, because a bad suggestion costs nothing.
 
-    The one constraint is grounding. Every suggestion resolves to a real
-    in-stock catalogue entry and carries a `why` the agent can relay. An
-    unexplainable recommendation is barely better than a random one.
+    There is one rule though: every book returned is real and in stock. The AI
+    only ever sees titles we sent it, so it cannot suggest something we do not
+    sell. It knows thousands of real books and would happily recommend one we
+    have never stocked.
+
+    Each suggestion also carries a "why", built from the themes and moods the
+    books actually share. A recommendation you cannot explain is not much better
+    than a random one.
     """
     themes = themes or []
     already_owned = set()
     seed_books = []
     basis = []
 
-    # Purchase history is a Tier 1 read, so it inherits the identity gate even
-    # though the recommendation is Tier 0. The tier follows the data touched, not
-    # the tool name.
+    # Using purchase history means reading their orders, so this needs identity
+    # verification even though recommendations normally do not.
+    #
+    # The risk level follows the DATA being touched, not the name of the tool.
+    # Same function, two different risk levels, depending on the arguments.
     if use_purchase_history:
         gate = guardrails.check_identity(session, "find_orders")
         if not gate.permitted:
@@ -576,7 +601,11 @@ def recommend_books(
 
 
 def find_book_clubs(session: Session, about_title: str = "", themes=None, **_):
-    """Tier 0. Grounded in real clubs with real dates and member counts."""
+    """
+    Find a reading group. Real groups only, with their real meeting dates and
+    member counts. If nothing matches we say so, because a made-up club with a
+    made-up date is worse than no answer.
+    """
     themes = themes or []
     clubs = []
 

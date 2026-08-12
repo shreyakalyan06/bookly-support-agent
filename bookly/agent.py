@@ -1,17 +1,24 @@
 """
-Agent orchestration.
+The loop that runs the agent.
 
-A hand-written tool-use loop against the Anthropic Messages API. No framework, on
-purpose. The loop is about fifteen lines of real logic, and owning it keeps the
-interesting decisions visible: when to stop, what to do with a refusal, what gets
-logged.
+The AI cannot look anything up by itself. It has no database, no network, no
+files. All it can do is write out a request saying "please run get_order with
+this order number". This code reads that request, decides whether to allow it,
+runs it, and sends the answer back. Then the AI carries on.
 
-    send conversation + tool schemas
-      -> model returns text and/or tool_use blocks
-      -> tool_use: run each handler, append tool_result blocks, send again
-      -> no tool_use: the turn is done
+So one customer message can mean several trips round this loop:
 
-A hard iteration cap stops a confused model looping at the customer's expense.
+    send the conversation so far, plus the list of tools the AI may request
+      -> the AI replies with text, or with tool requests, or both
+      -> if it asked for tools: run them, send the results back, go round again
+      -> if it just wrote text: it has finished, and that text is the reply
+
+The AI signals it is done by not asking for anything else. We never tell it to
+stop.
+
+Written by hand rather than using a framework. The loop is about fifteen lines,
+and keeping it here means the decisions that matter (when to stop, what to do
+with a refusal, what gets logged) stay visible.
 """
 
 import json
@@ -26,8 +33,10 @@ from .trace import ToolEvent, Tracer
 
 MODEL = os.environ.get("BOOKLY_MODEL", "claude-sonnet-5")
 
-# verify -> find -> get -> act is four round trips. Eight leaves headroom for a
-# retry without allowing an unbounded loop.
+# A confused AI can get stuck asking for the same thing over and over. Every
+# round costs money and makes the customer wait, so we cap it.
+# The normal path is four rounds: verify, find the order, read it, act.
+# Eight leaves room for one retry.
 MAX_ITERATIONS = 8
 
 
@@ -91,9 +100,11 @@ class BooklyAgent:
         self.tracer = Tracer(path=trace_path)
         self.messages: list[dict] = []
 
-    # Resolution classification, derived from what happened rather than from
-    # asking the model to self-report. Self-reporting fails in exactly the cases
-    # that matter most.
+    # Work out how the turn ended.
+    #
+    # We decide this from what actually happened (which tools ran, which were
+    # refused) rather than asking the AI to tell us. Asking it would be
+    # unreliable in exactly the situations we care about most.
     @staticmethod
     def _classify(turn, agent_text: str) -> str:
         tools_used = [e.tool_name for e in turn.tool_events]
@@ -104,16 +115,15 @@ class BooklyAgent:
             return "refused"
         if any(e.tool_name == "initiate_return" and e.outcome == "ok" for e in turn.tool_events):
             return "acted"
-        # "recommended" applies only when recommending was the request.
+        # "recommended" only counts when suggesting books WAS the request.
         #
-        # v1 returned it whenever those tools ran, so a correct refusal followed
-        # by a helpful suggestion got reclassified from "refused" to
-        # "recommended". The supplementary outcome overwrote the primary one, and
-        # scenarios written before the concierge feature started failing for
-        # behaviour I had asked for.
+        # First version marked any turn "recommended" if those tools ran. That
+        # broke things: refusing a return and then suggesting another book got
+        # relabelled from "refused" to "recommended". The helpful extra was
+        # overwriting the real outcome.
         #
-        # `recovery_offered` already tracks the offer, so it does not need to
-        # compete for this field.
+        # The book suggestion is already recorded separately in
+        # `recovery_offered`, so it does not need this field too.
         support_tools = {"find_orders", "get_order", "search_policy", "initiate_return"}
         used_support = any(e.tool_name in support_tools for e in turn.tool_events)
         if not used_support and any(
@@ -121,20 +131,22 @@ class BooklyAgent:
             for e in turn.tool_events
         ):
             return "recommended"
-        # "Clarifying" means the agent could not proceed and needs input, not
-        # that its reply contains a question mark.
+        # "clarifying" means the agent is stuck and needs an answer from the
+        # customer before it can continue. It does NOT just mean the reply has a
+        # question mark in it.
         #
-        # Three attempts, which is the point. v1 checked for a trailing '?' and
-        # misfiled any reply that asked something then closed politely. v2
-        # checked anywhere and immediately misfiled every courtesy closer, so the
-        # fix introduced a new failure.
+        # This took three goes.
+        #   v1: checked if the reply ended in "?". Wrong, because plenty of
+        #       replies answer the question and then close with one.
+        #   v2: checked for "?" anywhere. Also wrong, and worse: now every
+        #       "anything else I can help with?" counted. The fix broke more
+        #       than it mended.
+        #   v3: stop reading the words. Look at what happened instead. If a tool
+        #       came back with a real result, the agent made progress and any
+        #       question is just politeness. Only if nothing moved AND it asked
+        #       something is it actually stuck.
         #
-        # v3 reads the trace instead of the prose. If a substantive tool returned
-        # a result the agent made progress, and a question is a courtesy. Only
-        # when nothing advanced and it asked something is it genuinely blocked.
-        #
-        # Derive metrics from what the system did, not what it said. Surface text
-        # is the least reliable signal available.
+        # The lesson: judge the system by what it did, not by what it said.
         SUBSTANTIVE = {
             "find_orders",
             "get_order",
@@ -162,9 +174,8 @@ class BooklyAgent:
         try:
             payload, guardrail, cited = handler(self.session, **arguments)
         except Exception as exc:  # noqa: BLE001
-            # A tool failure is a normal, describable outcome. Tell the model
-            # plainly so it apologises and escalates rather than inventing a
-            # result.
+            # Something broke. Tell the AI plainly, so it apologises and
+            # offers a human. If we said nothing it might invent a result.
             payload = {
                 "ok": False,
                 "error": True,
@@ -179,7 +190,8 @@ class BooklyAgent:
         elif payload.get("refused"):
             outcome = "refused"
 
-        # Told about, not enforced. Recorded separately from guardrails_fired.
+        # The AI was TOLD about a limit here, rather than being stopped by one.
+        # Those are different and we count them separately. See trace.py.
         elig = payload.get("return_eligibility") or {}
         if elig.get("surfaced_constraint"):
             self.tracer.record_constraint(turn, elig["surfaced_constraint"])
@@ -239,7 +251,8 @@ class BooklyAgent:
                 )
             self.messages.append({"role": "user", "content": results})
         else:
-            # Loop cap hit. Fail visibly rather than returning nothing.
+            # We hit the round limit. Say so and hand over, rather than
+            # silently returning nothing.
             final_text = (
                 "I'm having trouble getting to the bottom of this. Let me pass you to a "
                 "colleague who can help."

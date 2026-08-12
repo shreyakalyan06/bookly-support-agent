@@ -1,18 +1,19 @@
 """
-Catalogue and reading community data.
+The books we sell and the reading groups we run.
 
-Supports the second half of the thesis: authority tiered by recoverability.
-Refunds cannot be undone, so they are gated. Recommendations can, so the agent
-gets to be generous.
+This file exists to show the other side of the design. Refunds are locked down
+because they cannot be undone. Book suggestions have no checks at all, because a
+bad one costs nothing.
 
-Two things about the data.
+Two things to notice.
 
-Recommendations are grounded here and must return a book_id. The model cannot
-invent a title for the same reason it cannot invent a policy. A customer ordering
-a book that does not exist is a ticket the agent created.
+The AI can only suggest books that are in here and in stock. It knows thousands
+of real books and would happily recommend one we have never sold, which creates
+a support problem rather than solving one.
 
-Book clubs are real objects with schedules and sizes, not a vague nudge to join
-the community. A concierge makes a specific offer.
+Reading groups are real objects with real dates and member counts. "Why not join
+our community" is not an offer. "Eleven people are discussing this on the 24th"
+is.
 """
 
 from datetime import date, timedelta
@@ -24,14 +25,16 @@ def _in_days(n: int) -> str:
     return (TODAY + timedelta(days=n)).isoformat()
 
 
-# Catalogue, weighted towards fantasy and literary fiction because that is where
-# Bookly's community is. The `mood` and `themes` fields make recommendation
-# something other than genre matching. "Something like Piranesi" is a request
-# about atmosphere, not shelf category.
+# The catalogue.
 #
-# `shop_cat_pick` is the staff-picks shelf, curated by Tiberius the bookshop cat.
-# A brand detail rather than a feature, but it gives the agent something warm and
-# specific to reach for.
+# The interesting fields are `themes` and `mood`. Without them, matching books
+# means matching genres, and genre is a poor guide. Someone asking for
+# "something like Piranesi" is describing an atmosphere, not a shelf. They might
+# well want a literary novel rather than more fantasy.
+#
+# `shop_cat_pick` is the staff picks shelf, chosen by Tiberius the shop cat. A
+# bit of shop personality rather than a feature, but it gives the agent
+# something specific and warm to reach for.
 
 CATALOGUE = {
     "BK-0001": {
@@ -232,8 +235,8 @@ CATALOGUE = {
 }
 
 
-# Book clubs, with a date, a size and a format. "Why not join our community" is
-# not an offer. "Eleven people are discussing this on the 24th" is.
+# Reading groups. Each has a real next meeting and a real number of members,
+# because a vague invitation is not an invitation.
 
 BOOK_CLUBS = {
     "CLB-001": {
@@ -294,13 +297,20 @@ BOOK_CLUBS = {
 }
 
 
-# Similarity, deliberately not a model call. Weighted overlap on themes and mood,
-# with genre as a weak signal rather than a filter, so "something like Piranesi"
-# can return literary fiction.
+# How we decide two books are alike. Just counting, no AI.
 #
-# Arithmetic because it is cheap, instant, inspectable and identical every time.
-# A customer asking twice gets the same answer, and I can explain why any book was
-# suggested. None of that holds if you ask a model to free-associate.
+# Count shared themes and multiply by 3. Count shared moods, multiply by 2. Add
+# 1 if the genre matches, 0.5 if the pace matches.
+#
+# Note genre is only worth 1 point, not a requirement. If we filtered by genre,
+# The Buried Giant could never be suggested to a Piranesi reader, and it is
+# arguably the best match we have.
+#
+# Why not just ask the AI to suggest something? It would be four lines instead
+# of forty, and it would give nicer reasons. But this is free, instant, gives
+# the same answer twice in a row, and every suggestion comes with a reason built
+# from the actual shared themes. When a merchandising team asks "why did it
+# recommend that", we can point at the numbers.
 
 _MOOD_WEIGHT = 2.0
 _THEME_WEIGHT = 3.0
@@ -320,15 +330,20 @@ def similarity(a: dict, b: dict) -> float:
 
 
 def find_by_title(title: str):
-    """Loose title match. Returns the book or None, never a best guess."""
+    """
+    Find a book by title. Returns the book, or None.
+
+    If a partial match hits two books, we return None rather than picking one.
+    Same principle as asking which order they meant: when it is ambiguous, do
+    not choose.
+    """
     needle = (title or "").strip().lower()
     if not needle:
         return None
     for book in CATALOGUE.values():
         if book["title"].lower() == needle:
             return book
-    # Substring fallback, only when it matches exactly one book. Ambiguity
-    # returns None so the agent asks rather than chooses.
+    # Try a partial match, but only accept it if exactly one book matches.
     partial = [b for b in CATALOGUE.values() if needle in b["title"].lower()]
     return partial[0] if len(partial) == 1 else None
 

@@ -1,37 +1,47 @@
 """
-The control layer.
+The permission checks. This file decides what is allowed.
 
-One question: given the session state, is this action permitted? This module
-never sees the model, the conversation, or the customer's words, so it cannot be
-persuaded.
+The AI can ask for anything. It cannot do anything. Every request for account
+data or money comes through here first, and this file answers yes or no.
 
-The AI proposes. This decides. Different jobs, different places.
+Notice what this file does NOT import: nothing to do with the AI, the
+conversation, or what the customer said. It only sees a session and an order. So
+there is nothing here to argue with. A customer can be as persuasive as they
+like and it changes none of these numbers.
 
-Decisions are returned, never raised, so a refusal is a loggable outcome rather
-than an exception the agent has to interpret.
+That is the whole point. Written in the AI's instructions, a rule is a request.
+Written here, it is a rule.
+
+Checks return a Decision object instead of raising an error, because a refusal
+is not a malfunction. Nothing has gone wrong; the system worked. It also means
+we can log refusals and count them.
 """
 
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
-# Business rules, in one place, as named constants. In production these move to
-# a policy service so CX operations can change them without a deploy. They still
-# resolve outside the model.
+# The actual business rules, in one place so they are easy to find and change.
+# In a real deployment these would move to a settings service so a support
+# manager could change them without a developer. They would still be resolved
+# here, outside the AI.
 
 RETURN_WINDOW_DAYS = 30
 AUTO_REFUND_CAP_GBP = 100.00
 IDENTITY_REQUIRED_FOR = {"find_orders", "get_order", "initiate_return"}
 
 
-# Tiered authority, sorted by recoverability.
+# Not every action deserves the same suspicion. Sort them by one question:
+# if this goes wrong, can we undo it?
 #
-#   Tier 0  informational   no gate      mistake costs a correction
-#   Tier 1  account read    identity     mistake leaks someone's data
-#   Tier 2  irreversible    full chain   mistake costs money and trust
+#   Tier 0  no checks       Suggest a book. Wrong? They say so, you move on.
+#   Tier 1  prove identity  Read their orders. Wrong? Someone sees another
+#                           customer's private data.
+#   Tier 2  every check     Refund money. Wrong? It cannot be pulled back.
 #
-# Lock down the money and the same architecture can afford to be generous with
-# recommendations. Calibration, not lockdown.
+# Locking down the money is what lets the agent be relaxed about everything
+# else. Without tier 2 being airtight, we would have to be nervous about tier 0
+# too.
 
 ACTION_TIERS = {
     "search_policy": 0,
@@ -67,11 +77,14 @@ class Decision:
 @dataclass
 class Session:
     """
-    What the guardrails need to know about the conversation so far.
+    What we remember about this conversation, kept on our side.
 
-    Identity lives here, not in the transcript. If the model tracked it in its
-    own context a customer could talk their way into it. One code path sets it:
-    a successful verify_customer call.
+    The important field is verified_customer_id. It lives here, in code, not in
+    the chat history. If the AI kept track of who was verified, a customer could
+    simply claim they had verified earlier and it might believe them. One of the
+    tests tries exactly that.
+
+    Only one thing can set this field: a verify_customer call that matched.
     """
 
     verified_customer_id: Optional[str] = None
@@ -88,7 +101,7 @@ class Session:
 
 
 def check_identity(session: Session, tool_name: str) -> Decision:
-    """No account data is reachable until identity is established."""
+    """Nothing about a customer's account can be read until they prove who they are."""
     if tool_name not in IDENTITY_REQUIRED_FOR:
         return Decision(True, "identity.not_required", "Tool does not touch account data.")
 
@@ -104,10 +117,11 @@ def check_identity(session: Session, tool_name: str) -> Decision:
 
 def check_ownership(session: Session, order: dict) -> Decision:
     """
-    A verified customer sees only their own orders.
+    Even a verified customer only sees their own orders.
 
-    Stops the worst failure available to a support agent, and does it here
-    rather than by asking the model to be careful.
+    Showing one customer another customer's data is the worst thing this agent
+    could do. So it is prevented here, in code, rather than by asking the AI to
+    be careful about it.
     """
     if order["customer_id"] != session.verified_customer_id:
         return Decision(
@@ -119,7 +133,7 @@ def check_ownership(session: Session, order: dict) -> Decision:
 
 
 def check_verification_attempts(session: Session) -> Decision:
-    """Rate limit identity guessing."""
+    """Stop someone sitting there guessing postcodes until one works."""
     if session.verification_attempts >= Session.MAX_VERIFICATION_ATTEMPTS:
         return Decision(
             False,
@@ -131,11 +145,11 @@ def check_verification_attempts(session: Session) -> Decision:
 
 def check_returnable(order: dict, today: Optional[date] = None) -> Decision:
     """
-    Return eligibility, resolved from data and dates, never from the
-    conversation.
+    Can this order be returned? Worked out from dates and status, never from
+    what the customer said.
 
-    Three rules reported separately. "You cannot return this" and "you cannot
-    return this yet" are different conversations.
+    Three separate reasons, reported separately on purpose. "You cannot return
+    this" and "you cannot return this yet" need very different replies.
     """
     today = today or date.today()
 
@@ -172,12 +186,12 @@ def check_returnable(order: dict, today: Optional[date] = None) -> Decision:
 
 def check_refund_value(order: dict) -> Decision:
     """
-    Value ceiling on autonomous action.
+    How much money the agent may move on its own.
 
-    Above the cap the agent still does the work: verify, look up, explain,
-    gather the reason. A human authorises the money. Most enterprise buyers want
-    exactly this, which makes "how much can it do alone" a configuration
-    question.
+    Above the cap it still does all the work: verifies the customer, finds the
+    order, explains the situation, takes the reason. A person just approves the
+    payment. Most companies buying this want exactly that, which turns "how much
+    can it do unsupervised" into a setting rather than a limitation.
     """
     if order["total"] > AUTO_REFUND_CAP_GBP:
         return Decision(
@@ -195,10 +209,12 @@ def check_refund_value(order: dict) -> Decision:
 
 def authorise_return(session: Session, order: dict, today: Optional[date] = None) -> Decision:
     """
-    Full authorisation chain for the one action that moves money.
+    All the checks for the one action that moves money, in order.
 
-    Ordered identity, ownership, eligibility, value. The first failure wins, so
-    the customer hears the most fundamental reason rather than an incidental one.
+    Identity, then ownership, then eligibility, then value. We stop at the first
+    failure, and the order matters. If an unverified person asks about a
+    104-day-old order, they should be told to verify, not told about the return
+    window. Deal with the most basic problem first.
     """
     for decision in (
         check_identity(session, "initiate_return"),
@@ -211,14 +227,16 @@ def authorise_return(session: Session, order: dict, today: Optional[date] = None
     return Decision(True, "return.authorised", "All checks passed.")
 
 
-# Tier 0 note
+# Why there is no check_recommendation() in this file
 #
-# There is deliberately no check_recommendation(). A recommendation is fully
-# recoverable. Suggest a book the customer does not fancy and they say so.
-# Gating it would add friction and protect nobody.
+# Suggesting a book needs no permission check at all. If the agent picks badly,
+# the customer says "not for me" and nothing is lost. A check here would add
+# friction and protect nobody.
 #
-# The one constraint is grounding, not authority: suggestions must resolve to a
-# real in-stock catalogue entry. That lives in the tool, since it concerns
-# truthfulness. See tools.recommend_books.
+# There IS one rule about recommendations, but it belongs elsewhere: the agent
+# may only name books that are actually in the catalogue and in stock. That is
+# about telling the truth, not about permission, so it lives in the tool. See
+# recommend_books in tools.py.
 #
-# Saying why an action has no guardrail is part of the design.
+# Being able to explain why something has no check is as much a decision as
+# adding one.
