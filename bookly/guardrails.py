@@ -1,56 +1,37 @@
 """
 The control layer.
 
-This module answers one question: given the current session state, is this
-action permitted? It has no knowledge of the language model, the conversation,
-or how the request was phrased. It cannot be persuaded, because it never reads
-the customer's words.
+One question: given the session state, is this action permitted? This module
+never sees the model, the conversation, or the customer's words, so it cannot be
+persuaded.
 
-This is the architectural claim of the whole submission. The model decides what
-to ATTEMPT. This module decides what is PERMITTED. Those are different jobs and
-they belong in different places.
+The AI proposes. This decides. Different jobs, different places.
 
-Every decision returns a Decision object rather than raising, so that a refusal
-is a first-class, loggable outcome rather than an exception the agent has to
-interpret.
+Decisions are returned, never raised, so a refusal is a loggable outcome rather
+than an exception the agent has to interpret.
 """
 
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
-# --------------------------------------------------------------------------
-# Business rules. These live in code, in one place, as named constants.
-#
-# In production these move to a policy service so that CX operations can change
-# them without a deploy -- but they still resolve OUTSIDE the model.
-# --------------------------------------------------------------------------
+# Business rules, in one place, as named constants. In production these move to
+# a policy service so CX operations can change them without a deploy. They still
+# resolve outside the model.
 
 RETURN_WINDOW_DAYS = 30
 AUTO_REFUND_CAP_GBP = 100.00
 IDENTITY_REQUIRED_FOR = {"find_orders", "get_order", "initiate_return"}
 
 
-# --------------------------------------------------------------------------
-# Tiered authority.
+# Tiered authority, sorted by recoverability.
 #
-# The obvious objection to putting constraints in code is that it produces a
-# system too restrictive to be useful. That objection assumes all actions
-# deserve the same suspicion. They do not.
+#   Tier 0  informational   no gate      mistake costs a correction
+#   Tier 1  account read    identity     mistake leaks someone's data
+#   Tier 2  irreversible    full chain   mistake costs money and trust
 #
-# The right axis is RECOVERABILITY. If an action is easy to undo, the agent
-# should be allowed to take it freely, because the cost of a mistake is close
-# to zero and the cost of over-caution is a worse customer experience. If an
-# action cannot be undone, it gets the full chain.
-#
-#   Tier 0  informational   no gate      wrong answer costs a correction
-#   Tier 1  account read    identity     wrong answer leaks someone's data
-#   Tier 2  irreversible    full chain   wrong answer costs money and trust
-#
-# This is what lets the same architecture be strict about refunds and generous
-# about recommendations. It is a calibration, not a lockdown -- and it is the
-# reason a control layer makes an agent MORE capable rather than less.
-# --------------------------------------------------------------------------
+# Lock down the money and the same architecture can afford to be generous with
+# recommendations. Calibration, not lockdown.
 
 ACTION_TIERS = {
     "search_policy": 0,
@@ -86,12 +67,11 @@ class Decision:
 @dataclass
 class Session:
     """
-    Everything the guardrails need to know about the conversation so far.
+    What the guardrails need to know about the conversation so far.
 
-    Identity lives here, not in the conversation transcript. That matters: if
-    verified_customer_id were something the model tracked in its own context, a
-    customer could talk their way into it. Here, it is set by exactly one code
-    path -- a successful verify_customer call -- and read by the guardrails.
+    Identity lives here, not in the transcript. If the model tracked it in its
+    own context a customer could talk their way into it. One code path sets it:
+    a successful verify_customer call.
     """
 
     verified_customer_id: Optional[str] = None
@@ -124,11 +104,10 @@ def check_identity(session: Session, tool_name: str) -> Decision:
 
 def check_ownership(session: Session, order: dict) -> Decision:
     """
-    A verified customer can only see their own orders.
+    A verified customer sees only their own orders.
 
-    This is the check that stops the most damaging failure mode in a support
-    agent: leaking one customer's data to another. It is enforced here rather
-    than by asking the model to be careful.
+    Stops the worst failure available to a support agent, and does it here
+    rather than by asking the model to be careful.
     """
     if order["customer_id"] != session.verified_customer_id:
         return Decision(
@@ -152,12 +131,11 @@ def check_verification_attempts(session: Session) -> Decision:
 
 def check_returnable(order: dict, today: Optional[date] = None) -> Decision:
     """
-    Return eligibility, resolved from data and dates -- never from the
+    Return eligibility, resolved from data and dates, never from the
     conversation.
 
-    Three separate rules, each reported distinctly, because "you cannot return
-    this" and "you cannot return this YET" are different customer experiences
-    and the agent needs to say the right one.
+    Three rules reported separately. "You cannot return this" and "you cannot
+    return this yet" are different conversations.
     """
     today = today or date.today()
 
@@ -196,10 +174,9 @@ def check_refund_value(order: dict) -> Decision:
     """
     Value ceiling on autonomous action.
 
-    Above the cap the agent may still do all the work -- verify, look up,
-    explain, gather the reason -- but a human authorises the money. This is
-    the pattern most enterprise buyers actually want, and it is why "how much
-    can it do on its own" is a configuration question rather than a capability
+    Above the cap the agent still does the work: verify, look up, explain,
+    gather the reason. A human authorises the money. Most enterprise buyers want
+    exactly this, which makes "how much can it do alone" a configuration
     question.
     """
     if order["total"] > AUTO_REFUND_CAP_GBP:
@@ -220,9 +197,8 @@ def authorise_return(session: Session, order: dict, today: Optional[date] = None
     """
     Full authorisation chain for the one action that moves money.
 
-    Ordered deliberately: identity, then ownership, then eligibility, then
-    value. The first failure short-circuits, so the reason surfaced to the
-    customer is the most fundamental one rather than an incidental one.
+    Ordered identity, ownership, eligibility, value. The first failure wins, so
+    the customer hears the most fundamental reason rather than an incidental one.
     """
     for decision in (
         check_identity(session, "initiate_return"),
@@ -235,20 +211,14 @@ def authorise_return(session: Session, order: dict, today: Optional[date] = None
     return Decision(True, "return.authorised", "All checks passed.")
 
 
-# --------------------------------------------------------------------------
 # Tier 0 note
 #
-# There is deliberately no check_recommendation() function.
+# There is deliberately no check_recommendation(). A recommendation is fully
+# recoverable. Suggest a book the customer does not fancy and they say so.
+# Gating it would add friction and protect nobody.
 #
-# That absence is the point. A recommendation is fully recoverable -- if the
-# agent suggests a book the customer does not fancy, they say so and the
-# conversation continues. Gating it would add friction and protect nobody.
+# The one constraint is grounding, not authority: suggestions must resolve to a
+# real in-stock catalogue entry. That lives in the tool, since it concerns
+# truthfulness. See tools.recommend_books.
 #
-# The one constraint on recommendations is not a permission check at all, it is
-# a grounding constraint: suggestions must resolve to a real catalogue entry
-# that is in stock. That lives in the tool, not here, because it is about
-# truthfulness rather than authority. See tools.recommend_books.
-#
-# Being able to say clearly WHY a given action has no guardrail is as much a
-# part of the design as the guardrails themselves.
-# --------------------------------------------------------------------------
+# Saying why an action has no guardrail is part of the design.

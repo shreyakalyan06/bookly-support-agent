@@ -1,20 +1,18 @@
 """
 Catalogue and reading community data.
 
-This module exists to support the second half of the thesis: that an agent's
-authority should be tiered by how recoverable the action is. Refunds are
-unrecoverable, so they are tightly gated. Recommendations are entirely
-recoverable, so the agent is allowed to be generous with them.
+Supports the second half of the thesis: authority tiered by recoverability.
+Refunds cannot be undone, so they are gated. Recommendations can, so the agent
+gets to be generous.
 
-Two things about the shape of the data:
+Two things about the data.
 
-1. Recommendations are grounded in this catalogue and must return a book_id.
-   The model cannot invent a title, for the same reason it cannot invent a
-   policy -- if a customer orders a book that does not exist, that is a support
-   ticket the agent created.
+Recommendations are grounded here and must return a book_id. The model cannot
+invent a title for the same reason it cannot invent a policy. A customer ordering
+a book that does not exist is a ticket the agent created.
 
-2. Book clubs are modelled as real objects with schedules and sizes, not as a
-   vague suggestion to "join our community". A concierge makes a specific offer.
+Book clubs are real objects with schedules and sizes, not a vague nudge to join
+the community. A concierge makes a specific offer.
 """
 
 from datetime import date, timedelta
@@ -26,19 +24,14 @@ def _in_days(n: int) -> str:
     return (TODAY + timedelta(days=n)).isoformat()
 
 
-# --------------------------------------------------------------------------
-# Catalogue
+# Catalogue, weighted towards fantasy and literary fiction because that is where
+# Bookly's community is. The `mood` and `themes` fields make recommendation
+# something other than genre matching. "Something like Piranesi" is a request
+# about atmosphere, not shelf category.
 #
-# Weighted towards fantasy and literary fiction because that is where Bookly's
-# community actually is. The `mood` and `themes` fields are what make
-# recommendation something other than genre matching -- "I want something like
-# Piranesi" is a request about atmosphere, not about shelf category.
-#
-# `shop_cat_pick` is Bookly's staff-picks shelf, curated by Tiberius, the
-# bookshop cat. It is a brand detail rather than a feature, but it gives the
-# agent something warm and specific to reach for, which is the difference
-# between a concierge and a search box.
-# --------------------------------------------------------------------------
+# `shop_cat_pick` is the staff-picks shelf, curated by Tiberius the bookshop cat.
+# A brand detail rather than a feature, but it gives the agent something warm and
+# specific to reach for.
 
 CATALOGUE = {
     "BK-0001": {
@@ -239,13 +232,8 @@ CATALOGUE = {
 }
 
 
-# --------------------------------------------------------------------------
-# Book clubs
-#
-# Modelled as concrete objects with a date, a size and a format, because a
-# concierge makes a specific offer. "Why not join our community" is not an
-# offer. "There are eleven people discussing this on the 24th" is.
-# --------------------------------------------------------------------------
+# Book clubs, with a date, a size and a format. "Why not join our community" is
+# not an offer. "Eleven people are discussing this on the 24th" is.
 
 BOOK_CLUBS = {
     "CLB-001": {
@@ -306,18 +294,13 @@ BOOK_CLUBS = {
 }
 
 
-# --------------------------------------------------------------------------
-# Similarity
+# Similarity, deliberately not a model call. Weighted overlap on themes and mood,
+# with genre as a weak signal rather than a filter, so "something like Piranesi"
+# can return literary fiction.
 #
-# Deliberately not a model call. Overlap on themes and mood, weighted, with
-# genre as a weak signal rather than a filter -- because "something like
-# Piranesi" should be allowed to return literary fiction.
-#
-# The reason this is arithmetic rather than a second LLM call: it is cheap,
-# instant, inspectable, and identical every time. A customer who asks twice
-# gets the same answer, and I can explain why any given book was suggested.
-# None of those are true of asking a model to free-associate.
-# --------------------------------------------------------------------------
+# Arithmetic because it is cheap, instant, inspectable and identical every time.
+# A customer asking twice gets the same answer, and I can explain why any book was
+# suggested. None of that holds if you ask a model to free-associate.
 
 _MOOD_WEIGHT = 2.0
 _THEME_WEIGHT = 3.0
@@ -337,15 +320,15 @@ def similarity(a: dict, b: dict) -> float:
 
 
 def find_by_title(title: str):
-    """Loose title match. Returns the book or None -- never a best guess."""
+    """Loose title match. Returns the book or None, never a best guess."""
     needle = (title or "").strip().lower()
     if not needle:
         return None
     for book in CATALOGUE.values():
         if book["title"].lower() == needle:
             return book
-    # Substring fallback, but only if it matches exactly one book. Ambiguity
-    # returns None so the agent has to ask rather than choose.
+    # Substring fallback, only when it matches exactly one book. Ambiguity
+    # returns None so the agent asks rather than chooses.
     partial = [b for b in CATALOGUE.values() if needle in b["title"].lower()]
     return partial[0] if len(partial) == 1 else None
 

@@ -2,13 +2,11 @@
 """
 Tests for the control layer.
 
-These run with no API key and no network. That is the point: the parts of this
-system that must never fail are deterministic, so they can be tested the way
-ordinary software is tested. Only the language part needs the softer,
-distributional evaluation in run_scenarios.py.
+No API key, no network. That is the point. The parts that must never fail are
+deterministic, so they get tested like ordinary software. Only the language half
+needs the statistical evaluation in run_scenarios.py.
 
-Being able to draw that line -- this half gets unit tests, that half gets
-statistical evaluation -- is the practical payoff of the architecture.
+Drawing that line is the practical payoff of the architecture.
 
     python evals/test_control_layer.py
 """

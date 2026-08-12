@@ -1,12 +1,11 @@
 """
 Mock data store for Bookly.
 
-In production this layer is replaced by real system calls: an order management
-system, a customer record in the CRM, and a help centre. The important design
-property is that this module is the ONLY place data lives, and every tool reads
-through it. Nothing reaches the model except via a tool return value.
+In production this becomes real system calls: an order management system, a CRM
+record, a help centre. What matters is that data lives only here and every tool
+reads through it. Nothing reaches the model except as a tool return value.
 
-Dates are relative to today so the demo behaves consistently whenever it runs.
+Dates are relative to today so the demo behaves the same whenever it runs.
 """
 
 from datetime import date, timedelta
@@ -18,11 +17,9 @@ def _days_ago(n: int) -> str:
     return (TODAY - timedelta(days=n)).isoformat()
 
 
-# --------------------------------------------------------------------------
-# Customers. Identity is verified on email + postcode, deliberately weak but
-# structurally enforced -- see guardrails.py. Real deployments would use the
-# customer's existing auth or a step-up verification flow.
-# --------------------------------------------------------------------------
+# Customers. Email plus postcode is deliberately weak verification, but it is
+# structurally enforced. See guardrails.py. Real deployments would use existing
+# account auth or step-up verification.
 
 CUSTOMERS = {
     "CUST-1001": {
@@ -40,19 +37,14 @@ CUSTOMERS = {
 }
 
 
-# --------------------------------------------------------------------------
-# Orders.
+# Orders, chosen to force specific behaviours:
+#   ORD-84201  delivered 6 days ago       inside return window, low value
+#   ORD-84315  in transit                 not returnable yet
+#   ORD-79930  delivered 104 days ago     outside return window
+#   ORD-84420  delivered, GBP 342.00      above auto-refund cap
+#   ORD-84501  return already in progress duplicate-refund guard
 #
-# The fixtures are chosen to force specific behaviours in the demo:
-#   ORD-84201  delivered 6 days ago      -> inside return window, low value
-#   ORD-84315  in transit                -> not returnable yet
-#   ORD-79930  delivered 104 days ago    -> outside return window (refusal)
-#   ORD-84420  delivered, GBP 342.00     -> above auto-refund cap (escalation)
-#   ORD-84501  return already in progress -> duplicate-refund guard
-#
-# CUST-1001 has two open orders, which is what forces the agent to ask a
-# clarifying question rather than guess.
-# --------------------------------------------------------------------------
+# CUST-1001 has two open orders, so "where is my order" forces a question.
 
 _ORDER_FIXTURES = {
     "ORD-84201": {
@@ -141,13 +133,9 @@ _ORDER_FIXTURES = {
 }
 
 
-# --------------------------------------------------------------------------
-# Policy corpus.
-#
-# Each passage has a stable id. The agent is required to cite a passage id for
-# any policy claim -- that is what makes the grounding rule auditable rather
-# than aspirational.
-# --------------------------------------------------------------------------
+# Policy corpus. Each passage has a stable id, and the agent must cite one for
+# any policy claim. That is what makes grounding auditable rather than
+# aspirational.
 
 POLICY_PASSAGES = [
     {
@@ -257,23 +245,18 @@ def get_order(order_id: str):
     return ORDERS.get((order_id or "").strip().upper())
 
 
-# --------------------------------------------------------------------------
 # Per-thread order state.
 #
-# initiate_return mutates an order (setting return_status) so that a second
-# attempt is genuinely blocked. That is correct behaviour, but it made the store
-# stateful -- and the eval runner executes scenarios concurrently against one
-# process.
+# initiate_return sets return_status so a second attempt is genuinely blocked.
+# Correct behaviour, but it makes the store stateful, and the eval runner runs
+# scenarios concurrently in one process.
 #
-# The symptom was return-eligible-end-to-end passing exactly 1 of 3 runs with
-# the reason "already in progress": the first run succeeded, mutated the shared
-# dictionary, and poisoned the other two. A real defect in the test harness that
-# looked exactly like an agent failure.
+# Symptom: return-eligible-end-to-end passed exactly 1 of 3 runs, reason
+# "already in progress". Run one succeeded, mutated the shared dict, poisoned
+# the other two. A harness defect that looked like an agent failure.
 #
-# Each thread now gets its own deep copy, so runs cannot contaminate each other.
-# In production this layer is a database and the equivalent discipline is a
-# transaction rolled back per test.
-# --------------------------------------------------------------------------
+# Each thread now gets its own deep copy. In production this layer is a database
+# and the equivalent is a transaction rolled back per test.
 
 import copy
 import threading

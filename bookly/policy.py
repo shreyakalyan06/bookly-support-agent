@@ -1,14 +1,12 @@
 """
 Policy retrieval.
 
-Deliberately simple: keyword and token overlap scoring over a small curated
-corpus. There is no vector database here, and that is a decision rather than a
-shortcut -- see the note at the bottom.
+Keyword and token overlap over a small curated corpus. No vector database, and
+that is a decision rather than a shortcut. See the note at the bottom.
 
-The important property is not the retrieval quality. It is that every passage
-carries a stable id, and the agent is required to return that id when it makes
-a policy claim. That turns "the agent should not make things up" from a request
-into something a reviewer can check after the fact.
+What matters is not retrieval quality. Every passage carries a stable id and the
+agent must return it when making a policy claim. That turns "do not make things
+up" from a request into something a reviewer can check afterwards.
 """
 
 import re
@@ -29,11 +27,11 @@ def _tokenise(text: str):
 
 def _score(query: str, passage: dict) -> float:
     """
-    Score = weighted keyword phrase hits + token overlap with the passage body.
+    Weighted keyword hits plus token overlap with the passage body.
 
-    Keyword hits are weighted higher because they are hand-curated intent
-    signals, which is the same reason a real deployment curates its help centre
-    rather than trusting raw embeddings over whatever content exists.
+    Keywords score higher because they are hand-curated intent signals. Same
+    reason a real deployment curates its help centre rather than trusting raw
+    embeddings over whatever content happens to exist.
     """
     q_lower = (query or "").lower()
     q_tokens = set(_tokenise(query))
@@ -53,18 +51,18 @@ def _score(query: str, passage: dict) -> float:
     return keyword_score + (overlap * 0.5)
 
 
-# Below this score, we return nothing rather than returning the least-bad match.
-# This threshold is the single most consequential number in this file: it is the
-# difference between an agent that says "I don't know" and one that improvises.
+# Below this score, return nothing rather than the least-bad match. The most
+# consequential number in this file. It is the difference between an agent that
+# says "I don't know" and one that improvises.
 MIN_RELEVANCE = 2.0
 
 
 def search_policy(query: str, top_k: int = 3):
     """
-    Return the most relevant policy passages, or an empty list.
+    Return the most relevant passages, or an empty list.
 
-    An empty list is a valid and useful result. The agent's instructions require
-    it to hand off rather than answer when retrieval comes back empty.
+    Empty is a useful result. The agent is instructed to hand off rather than
+    answer when retrieval finds nothing.
     """
     scored = [(_score(query, p), p) for p in POLICY_PASSAGES]
     hits = [(s, p) for s, p in scored if s >= MIN_RELEVANCE]
@@ -81,16 +79,13 @@ def search_policy(query: str, top_k: int = 3):
     ]
 
 
-# --------------------------------------------------------------------------
 # Why keyword retrieval and not embeddings
 #
-# For a nine-passage corpus, embeddings would add an API dependency, latency,
-# and a similarity threshold that is harder to reason about, in exchange for
-# better handling of paraphrase. At Bookly's real scale -- a help centre of a
-# few hundred articles -- I would use hybrid retrieval: BM25 for exact policy
-# terms plus embeddings for paraphrase, with reciprocal rank fusion.
+# For nine passages, embeddings add an API dependency, latency, and a similarity
+# threshold that is harder to reason about, in exchange for better paraphrase
+# handling. At a real help centre's scale, a few hundred articles, I would use
+# hybrid retrieval: BM25 for exact policy terms plus embeddings for paraphrase,
+# with reciprocal rank fusion.
 #
-# The part that would NOT change is the citation contract and the "return
-# nothing below threshold" rule. Those are architectural. The retriever behind
-# them is an implementation detail, which is the point.
-# --------------------------------------------------------------------------
+# The citation contract and the threshold rule would not change. Those are
+# architectural. The retriever is an implementation detail.

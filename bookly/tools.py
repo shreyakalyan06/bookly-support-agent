@@ -1,26 +1,23 @@
 """
 Tool definitions and handlers.
 
-Two things worth noticing about the shape of this module:
+Two things about the shape of this module.
 
-1. Every handler that touches account data calls into guardrails BEFORE doing
-   any work, and returns a structured refusal if the check fails. The model
-   receives the refusal as a tool result. It cannot route around it, because it
-   never had the ability to act directly -- it only ever had the ability to ask.
+Every handler touching account data calls guardrails before doing any work, and
+returns a structured refusal if the check fails. The model gets the refusal as a
+tool result and cannot route around it, because asking was the only power it ever
+had.
 
-2. Tool results are structured data, not prose. The model's job is to turn them
-   into something a human wants to read. Keeping the two separate means the
-   behaviour of the system does not depend on the model interpreting a sentence
-   correctly.
+Tool results are structured data, not prose. The model turns them into something
+a human wants to read. Keeping those separate means system behaviour does not
+depend on the model reading a sentence correctly.
 """
 
 from datetime import date
 from . import catalogue, data, guardrails, policy
 from .guardrails import Decision, Session
 
-# --------------------------------------------------------------------------
 # Schemas passed to the model
-# --------------------------------------------------------------------------
 
 TOOL_SCHEMAS = [
     {
@@ -28,7 +25,7 @@ TOOL_SCHEMAS = [
         "description": (
             "Verify a customer's identity using their email address and postcode. "
             "This must succeed before any order information can be accessed. "
-            "Do not guess or assume either value -- ask the customer for both."
+            "Do not guess or assume either value, ask the customer for both."
         ),
         "input_schema": {
             "type": "object",
@@ -67,7 +64,7 @@ TOOL_SCHEMAS = [
             "returns, refunds, cancellations, gift cards or account access. You must call "
             "this before stating a policy, and you must cite the passage_id you relied on. "
             "If it returns no passages, say you do not have that information and offer a "
-            "human -- do not answer from general knowledge."
+            "human, do not answer from general knowledge."
         ),
         "input_schema": {
             "type": "object",
@@ -108,7 +105,7 @@ TOOL_SCHEMAS = [
             "customer is verified you may pass use_purchase_history to draw on what they have "
             "already bought.\n\n"
             "You may only recommend books this tool returns. Never suggest a title from your "
-            "own knowledge, even if you are confident Bookly stocks it -- a recommendation for "
+            "own knowledge, even if you are confident Bookly stocks it, a recommendation for "
             "something we cannot sell creates a support problem rather than solving one."
         ),
         "input_schema": {
@@ -143,7 +140,7 @@ TOOL_SCHEMAS = [
         "description": (
             "Find Bookly reading groups. Use this when a customer mentions wanting to talk "
             "about a book, is unsure whether they'll get on with something, or when a return "
-            "or refusal has left them without a good outcome -- an invitation to a group "
+            "or refusal has left them without a good outcome, an invitation to a group "
             "discussing that book is often a better ending than an apology.\n\n"
             "Only mention clubs this tool returns, with their real meeting date and size."
         ),
@@ -185,16 +182,12 @@ TOOL_SCHEMAS = [
 ]
 
 
-# --------------------------------------------------------------------------
-# Handlers
-#
-# Each returns (payload_dict, guardrail_decision_or_None, cited_passage_ids)
-# so the tracer can record the permission decision separately from the result.
-# --------------------------------------------------------------------------
+# Handlers. Each returns (payload, guardrail_decision_or_None, cited_ids) so the
+# tracer records the permission decision separately from the result.
 
 
 def _refusal(decision: Decision):
-    """A refusal is data, in a consistent shape, so the model handles it predictably."""
+    """A refusal is data in a consistent shape, so the model handles it predictably."""
     return {
         "ok": False,
         "refused": True,
@@ -299,25 +292,22 @@ def get_order(session: Session, order_id: str = "", **_):
             "order": {
                 k: v for k, v in order.items() if k != "customer_id"
             },
-            # Eligibility is computed here and handed to the model as a fact.
-            # The model is never asked to work out whether a date is inside a
-            # window, because arithmetic on dates is not what it is good at.
+            # Eligibility computed here and handed over as a fact. The model is
+            # never asked whether a date falls inside a window.
             "return_eligibility": {
                 "returnable": returnable.permitted,
                 "rule": returnable.rule,
                 "reason": returnable.reason,
-                # Surfaced so the agent can decline gracefully rather than
-                # attempting the action and being refused. The refusal would
-                # still hold -- see authorise_return -- but a customer should
-                # not have to watch the system catch itself.
-                # Both blocking rules are surfaced, not just the window.
+                # Surfaced so the agent declines gracefully rather than
+                # attempting and being refused. The refusal still holds either
+                # way. See authorise_return.
+                # Both blocking rules surfaced, not just the window.
                 #
-                # Originally only `returnable` was reported here, so an order
-                # that was inside the window but above the autonomous refund
-                # ceiling looked completely clear to the agent. It would attempt
-                # the return, get refused, and the customer would watch the
-                # system catch itself. Surfacing the ceiling lets the agent
-                # explain up front that a colleague needs to approve it.
+                # v1 reported only `returnable`, so an order inside the window
+                # but above the refund ceiling looked clear. The agent would
+                # attempt it, get refused, and the customer watched the system
+                # catch itself. Surfacing the ceiling lets it explain up front
+                # that a colleague must approve.
                 "surfaced_constraint": (
                     returnable.rule
                     if not returnable.permitted
@@ -373,7 +363,7 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
     if not decision.permitted:
         payload = _refusal(decision)
         # For the value ceiling specifically, tell the model that a human CAN do
-        # this -- otherwise it will imply the customer is out of options.
+        # this, otherwise it implies the customer is out of options.
         if decision.rule == "refund.above_auto_cap":
             payload["next_step"] = "escalate_to_human"
             payload["customer_facing_note"] = (
@@ -412,7 +402,7 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
 
 
 def _book_card(book: dict, why: str = ""):
-    """Consistent, minimal shape. The model writes the prose; this supplies the facts."""
+    """Minimal, consistent shape. This supplies facts. The model writes the prose."""
     card = {
         "book_id": book["book_id"],
         "title": book["title"],
@@ -436,11 +426,11 @@ def recommend_books(
     **_,
 ):
     """
-    Tier 0. No permission gate -- a recommendation is fully recoverable.
+    Tier 0. No permission gate, because a recommendation is fully recoverable.
 
-    The one constraint is grounding: every suggestion resolves to a real,
-    in-stock catalogue entry, and each carries a `why` the agent can relay. An
-    unexplainable recommendation is only marginally better than a random one.
+    The one constraint is grounding. Every suggestion resolves to a real
+    in-stock catalogue entry and carries a `why` the agent can relay. An
+    unexplainable recommendation is barely better than a random one.
     """
     themes = themes or []
     already_owned = set()
@@ -448,8 +438,8 @@ def recommend_books(
     basis = []
 
     # Purchase history is a Tier 1 read, so it inherits the identity gate even
-    # though the recommendation itself is Tier 0. The tier is a property of the
-    # data touched, not of the tool's name.
+    # though the recommendation is Tier 0. The tier follows the data touched, not
+    # the tool name.
     if use_purchase_history:
         gate = guardrails.check_identity(session, "find_orders")
         if not gate.permitted:
@@ -577,7 +567,7 @@ def recommend_books(
             "recommendations": results,
             "instruction": (
                 "Recommend only these titles. Mention why each one fits, in your own words. "
-                "Two or three is plenty -- a long list is a search result, not a recommendation."
+                "Two or three is plenty, a long list is a search result, not a recommendation."
             ),
         },
         None,
@@ -586,7 +576,7 @@ def recommend_books(
 
 
 def find_book_clubs(session: Session, about_title: str = "", themes=None, **_):
-    """Tier 0. Grounded in real clubs with real meeting dates and sizes."""
+    """Tier 0. Grounded in real clubs with real dates and member counts."""
     themes = themes or []
     clubs = []
 

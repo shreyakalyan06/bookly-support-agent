@@ -2,20 +2,20 @@
 """
 Failure triage.
 
-Reads results.json from a previous run and groups the failures by cause, so you
-can tell whether the AGENT misbehaved or the ASSERTION was wrong. Costs nothing
--- it re-reads what you already paid for.
+Reads results.json from a previous run and groups failures by cause, so you can
+tell whether the agent misbehaved or the assertion was wrong. Costs nothing, since
+it re-reads what you already paid for.
 
     python evals/triage.py results.json
 
-The distinction it is trying to surface:
+Three kinds:
 
   agent bug      the agent did something a customer would object to
   eval bug       the agent did something reasonable and the test called it wrong
-  underspecified the scripted turns did not give the agent room to do the thing
+  underspecified the script gave the agent no room to do the thing
 
-Only the first kind is worth fixing in the agent. The second is worth fixing in
-the test, honestly and on the record. The third is a scenario design problem.
+Only the first gets fixed in the agent. The second gets fixed in the test, on the
+record. The third is a scenario design problem.
 """
 
 import json

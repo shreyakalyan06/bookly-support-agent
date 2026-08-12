@@ -3,11 +3,11 @@
 Interactive chat with the Bookly agent.
 
     python cli.py              normal chat
-    python cli.py --trace      show the tool calls and guardrail decisions inline
+    python cli.py --trace      show tool calls and guardrail decisions inline
 
-The --trace flag exists because this is a demo for a technical audience. In a
-real deployment the same information goes to the observability pipeline instead
-of the terminal, but it is the same data.
+--trace exists because this is a demo for a technical audience. In a real
+deployment the same data goes to the observability pipeline rather than the
+terminal.
 """
 
 import argparse

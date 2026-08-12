@@ -1,21 +1,15 @@
 """
 Structured tracing.
 
-Every turn emits a machine-readable record of what happened: what the model
-decided, which tools it called, which guardrails fired, which policy passages
-were cited, and whether the turn ended in an action, an answer, a refusal, or a
-handoff.
+Every turn records what the model decided, which tools it called, which
+guardrails fired, which passages it cited, and how the turn ended.
 
-This is not logging for debugging. It is the substrate for three things that a
-production deployment cannot do without:
+Not debug logging. This is the substrate for three things a production deployment
+needs: evaluation, since you cannot score behaviour you cannot inspect; quality
+monitoring by sampling live conversations; and answering "why did it do that",
+which in a regulated buyer's procurement is the question that closes the deal.
 
-  1. Evaluation -- you cannot score behaviour you cannot inspect.
-  2. Quality monitoring -- sampling live conversations for review.
-  3. Answering "why did it do that", which in a regulated buyer's procurement
-     process is the question that decides whether the deal closes.
-
-Written as JSON lines so it can be read straight into a dataframe or a
-warehouse table without parsing.
+JSON lines, so it loads straight into a dataframe or a warehouse table.
 """
 
 import json
@@ -42,7 +36,7 @@ class ToolEvent:
 
 @dataclass
 class TurnTrace:
-    """One customer message and everything that followed from it."""
+    """One customer message and everything that followed."""
 
     turn_id: str
     conversation_id: str
@@ -52,18 +46,17 @@ class TurnTrace:
     tool_events: list = field(default_factory=list)
     guardrails_fired: list = field(default_factory=list)
     cited_passages: list = field(default_factory=list)
-    # Constraints the model was TOLD about (e.g. get_order reporting that an
-    # order is outside the return window) as opposed to constraints that had to
-    # be ENFORCED. A well-behaved agent reads the first kind and never triggers
-    # the second. Tracking them separately is what lets us tell "the model
-    # declined correctly" apart from "the code caught the model".
+    # Constraints the model was told about, as opposed to constraints that had
+    # to be enforced. A well-behaved agent reads the first and never triggers the
+    # second. Tracking them separately distinguishes "the model declined" from
+    # "the code caught the model".
     constraints_surfaced: list = field(default_factory=list)
     resolution: str = "answered"  # answered | acted | refused | clarifying | escalated | recommended
     identity_verified: bool = False
-    # Set when the agent offered something useful after a refusal or a dead end.
-    # Tracked separately from `resolution` because a refusal that ends well and a
-    # refusal that ends badly look identical on a containment metric, and the
-    # difference between them is the whole commercial argument.
+    # Set when the agent offered something useful after a refusal or dead end.
+    # Separate from `resolution` because a refusal that ends well and one that
+    # ends badly look identical on a containment metric, and the gap between them
+    # is the commercial argument.
     recovery_offered: bool = False
     agent_message: str = ""
 
@@ -119,10 +112,8 @@ class Tracer:
             with self.path.open("a") as f:
                 f.write(json.dumps(turn.as_dict()) + "\n")
 
-    # ----------------------------------------------------------------------
-    # Conversation-level rollup. These are the fields a CX operations team
-    # would actually put on a dashboard, derived rather than hand-counted.
-    # ----------------------------------------------------------------------
+    # Conversation rollup. The fields a CX operations team would put on a
+    # dashboard, derived rather than hand-counted.
 
     def summary(self) -> dict:
         resolutions = [t.resolution for t in self.turns]
@@ -133,11 +124,10 @@ class Tracer:
             "guardrails_fired": [r for t in self.turns for r in t.guardrails_fired],
             "constraints_surfaced": sorted({c for t in self.turns for c in t.constraints_surfaced}),
             # The interesting split. "model_declined" means the agent was told
-            # about a constraint and respected it without the code having to
-            # intervene. "code_blocked" means the agent attempted the action and
-            # was stopped. Both are safe outcomes; the ratio tells you how often
-            # the model needs catching, which is the number that should shape how
-            # much you invest in the control layer.
+            # a constraint and respected it unprompted. "code_blocked" means it
+            # attempted the action and was stopped. Both are safe. The ratio
+            # tells you how often the model needs catching, which is what should
+            # shape investment in the control layer.
             "refusal_source": (
                 "code_blocked"
                 if any(t.guardrails_fired for t in self.turns)
@@ -153,9 +143,9 @@ class Tracer:
             "clarifying_questions": resolutions.count("clarifying"),
             "escalated": "escalated" in resolutions,
             "contained": "escalated" not in resolutions,
-            # The metric that distinguishes a returns desk from a concierge:
-            # of the turns that ended in a refusal, how many still gave the
-            # customer somewhere to go?
+            # The metric separating a returns desk from a concierge. Of the
+            # turns that ended in a refusal, how many gave the customer somewhere
+            # to go?
             "refusals_with_recovery": sum(
                 1 for t in self.turns if t.resolution == "refused" and t.recovery_offered
             ),
