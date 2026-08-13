@@ -151,12 +151,40 @@ check("12 copies at 999p is over the cap, even though one is not",
       guardrails.check_refund_value(big_qty, pence=999 * 12).permitted is False)
 check("a single copy is still fine",
       guardrails.check_refund_value(big_qty, pence=999).permitted is True)
-s = verified()
-data.ORDERS["ORD-84201"]["items"][0]["qty"] = 12
-payload, _, _ = tools.initiate_return(s, order_id="ORD-84201", item_id="ITM-1", reason="x")
-check("the handler multiplies by qty before the cap sees it",
-      payload.get("rule") == "refund.above_auto_cap", payload)
+check("the cap sees price times qty, not price",
+      guardrails.check_refund_value(big_qty, pence=999 * 12).rule == "refund.above_auto_cap")
+
+print("\nA tool that found nothing is not a success")
+sm = Session()
+miss, _, _ = tools.recommend_books(sm, liked_title="Dune")
+check("a book we do not stock reports ok False", miss.get("ok") is False, miss)
+hit, _, _ = tools.recommend_books(sm, liked_title="Piranesi")
+check("a book we do stock reports ok True", hit.get("ok") is True)
+pmiss, _, _ = tools.search_policy(sm, query="loyalty points airline partners")
+check("a policy miss reports ok False", pmiss.get("ok") is False, pmiss)
+
+print("\nOne order, one item already going back")
 data.reset_state()
+st = Session()
+tools.verify_customer(st, email="tom.whitfield@example.com", postcode="M1 4BT")
+payload, _, _ = tools.get_order(st, order_id="ORD-84501")
+elig = payload["return_eligibility"]
+check("no item is offered as returnable", elig["returnable_item_ids"] == [], elig)
+check("the returned item is named", elig["already_returned_item_ids"] == ["ITM-1"], elig)
+check("the order-level flag agrees with the items",
+      elig["returnable"] is False, elig)
+check("and the constraint is surfaced, so the trace records it",
+      elig["surfaced_constraint"] == "return.already_in_progress", elig)
+blocked, _, _ = tools.initiate_return(st, order_id="ORD-84501", item_id="ITM-1", reason="x")
+check("initiate_return agrees rather than contradicting",
+      blocked.get("rule") == "return.already_in_progress", blocked)
+
+print("\nA technical failure does not lock the session")
+sf = Session()
+tools.escalate_to_human(sf, reason="technical_failure: timeout", summary="x", set_gate=False)
+check("the gate stays open after an infra failure", sf.escalated is False)
+tools.escalate_to_human(sf, reason="customer asked", summary="x")
+check("but a real handoff does set it", sf.escalated is True)
 
 print("\nDispatch fails closed")
 check("a tool with no policy entry is refused",

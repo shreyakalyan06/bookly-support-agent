@@ -17,7 +17,6 @@ something a person wants to read. Keeping those jobs apart means the system does
 not depend on the AI reading a sentence correctly.
 """
 
-from datetime import date
 from . import catalogue, data, guardrails, policy
 from .guardrails import Decision, Session
 
@@ -275,7 +274,13 @@ def get_order(session: Session, order_id: str = "", **_):
             [],
         )
 
-    returnable = guardrails.check_returnable(order)
+    # True when at least one item can still go back. An order-level check with no
+    # item cannot say more than that honestly.
+    returnable = next(
+        (d for d in (guardrails.check_returnable(order, item_id=i["item_id"])
+                     for i in order["items"]) if d.permitted),
+        guardrails.check_returnable(order, item_id=order["items"][0]["item_id"]),
+    )
 
     return (
         {
@@ -301,10 +306,16 @@ def get_order(session: Session, order_id: str = "", **_):
                 "surfaced_constraint": (
                     returnable.rule if not returnable.permitted else None
                 ),
-                # Dates and status are order level, but "already returned" is per
-                # item, so name the items rather than implying the whole order is
-                # or is not returnable.
-                "already_returned": list(order.get("returned_item_ids", [])),
+                # Per item, because returnability is. The order-level version said
+                # returnable: True on an order whose only remaining item had
+                # already gone back, and then initiate_return refused. Two
+                # conflicting facts handed to the model is the opposite of the
+                # point of this layer.
+                "returnable_item_ids": [
+                    i["item_id"] for i in order["items"]
+                    if guardrails.check_returnable(order, item_id=i["item_id"]).permitted
+                ],
+                "already_returned_item_ids": list(order.get("returned_item_ids", [])),
             },
         },
         gate.as_dict(),
@@ -318,7 +329,7 @@ def search_policy(session: Session, query: str = "", **_):
     if not hits:
         return (
             {
-                "ok": True,
+                "ok": False,
                 "found": False,
                 "passages": [],
                 "instruction": (
@@ -334,8 +345,7 @@ def search_policy(session: Session, query: str = "", **_):
     return (
         {
             "ok": True,
-            "ok": True,
-        "found": True,
+            "found": True,
             "passages": hits,
             "instruction": "Answer only from these passages and cite the passage_id you used.",
         },
@@ -460,7 +470,7 @@ def recommend_books(
         if seed is None:
             return (
                 {
-                    "ok": True,
+                    "ok": False,
                     "found": False,
                     "recommendations": [],
                     "instruction": (
@@ -535,7 +545,7 @@ def recommend_books(
     if not results:
         return (
             {
-                "ok": True,
+                "ok": False,
                 "found": False,
                 "recommendations": [],
                 "instruction": (
@@ -551,8 +561,7 @@ def recommend_books(
     return (
         {
             "ok": True,
-            "ok": True,
-        "found": True,
+            "found": True,
             "basis": basis,
             "recommendations": results,
             "instruction": (
@@ -565,11 +574,13 @@ def recommend_books(
     )
 
 
-def escalate_to_human(session: Session, reason: str = "", summary: str = "", **_):
-    # Recorded so the trace shows the handoff. It does not gate anything: the
-    # agent keeps taking turns after this, which a real deployment would stop.
-    # See Known Limits.
-    session.escalated = True
+def escalate_to_human(session: Session, reason: str = "", summary: str = "",
+                      set_gate: bool = True, **_):
+    # set_gate is False when the loop calls this because something broke on our
+    # side. The customer still gets a queued handoff with a summary, and a network
+    # blip does not disable the refund path for the rest of the conversation.
+    if set_gate:
+        session.escalated = True
     return (
         {
             "ok": True,

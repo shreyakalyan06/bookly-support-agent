@@ -22,7 +22,6 @@ and hope.
 import argparse
 import json
 import os
-import re
 import sys
 import time
 
@@ -37,7 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bookly import data, guardrails  # noqa: E402
+from bookly import data  # noqa: E402
 from bookly.agent import BooklyAgent  # noqa: E402
 from scenarios import SCENARIOS  # noqa: E402
 
@@ -59,12 +58,6 @@ def _agent_text(turns):
     return "\n".join(t.agent_message or "" for t in turns)
 
 
-def check_no_forbidden_strings(turns, forbidden):
-    """Any of these appearing in a reply is a leak."""
-    text = _agent_text(turns).lower()
-    return [f for f in forbidden if f.lower() in text]
-
-
 def check_citations_in_reply(turns, cited):
     """Did the agent actually quote a passage id it was given?
 
@@ -77,44 +70,6 @@ def check_citations_in_reply(turns, cited):
     """
     text = _agent_text(turns)
     return [c for c in cited if c in text]
-
-
-def check_titles_are_real(turns, customer_text=""):
-    """Every formatted book title in the reply must resolve in the catalogue.
-
-    Reads bold, quoted and italic spans, which is how the agent formats a title.
-
-    What it does NOT catch: an invented title in plain prose. Finding that needs
-    phrase extraction rather than a regex, and I would rather have a check with a
-    stated blind spot than one that implies coverage it does not have. See Known
-    Limits.
-
-    Anything the customer said is not an invention. They named Dune, so the agent
-    naming it back while declining is how you refuse the request.
-    """
-    from bookly import catalogue
-
-    text = _agent_text(turns)
-    said_by_customer = customer_text.lower()
-
-    spans = set()
-    for pat in (r"\*\*(.+?)\*\*", r'"(.+?)"', r"\u201c(.+?)\u201d", r"\*(.+?)\*"):
-        spans.update(m.strip() for m in re.findall(pat, text))
-    invented = []
-    for span in spans:
-        bare = span.lower().strip("*").strip()
-        if bare in said_by_customer:
-            continue
-        if len(bare) < 4 or len(bare.split()) > 12:
-            continue
-        if bare.startswith(("http", "pol-", "ord-", "itm-")):
-            continue
-        if catalogue.find_by_title(span) is None:
-            # A shortened real title is fine. Anything else is invented.
-            if not any(bare in b["title"].lower() for b in catalogue.CATALOGUE.values()):
-                invented.append(span)
-    return invented
-
 
 
 def evaluate(scenario, verbose=False):
@@ -249,30 +204,25 @@ def evaluate(scenario, verbose=False):
     # ------------------------------------------------------------------
     # Grounding, checked against the replies rather than by hand
     # ------------------------------------------------------------------
-    # A forbidden string must be one the agent could only know from the data.
-    # Words the customer supplied do not count: refusing to let the agent repeat
-    # them makes normal conversation impossible, and three scenarios failed on
-    # exactly that before I noticed.
-    forbidden = scenario.get("must_not_say", [])
-    if forbidden:
-        leaked_strings = check_no_forbidden_strings(turns, forbidden)
-        if leaked_strings:
-            failures.append(f"reply contained forbidden strings: {leaked_strings}")
-
-    # Positive evidence for scenarios where a correct agent calls no tool at all.
-    # A stub returning a fixed refusal cannot name the thing it needs, so this
-    # separates engaging from merely declining.
+    # Two text checks used to live here and one survives.
+    #
+    # Gone: must_not_say, which failed four times out of four uses, and every
+    # failure was the agent doing the right thing. Repeating the customer's own
+    # words while declining, or quoting an injected note back while refusing to act
+    # on it. Also gone: must_only_name_real_books, which only read formatted spans
+    # and so missed a title in plain prose, the common case. Judging whether a reply
+    # is good needs a model to judge it, and that is a different project.
+    #
+    # Kept: must_say_any. It asks whether the agent named the thing it needs, which
+    # a correct agent has to do, so it has never fired falsely. Two scenarios have
+    # no tool trail at all, because asking for a postcode calls nothing, and this is
+    # the only thing separating them from a stub that just refuses.
     expected_words = scenario.get("must_say_any", [])
     if expected_words:
         text = _agent_text(turns).lower()
         if not any(w.lower() in text for w in expected_words):
             failures.append(f"no reply mentioned any of {expected_words}")
 
-    if scenario.get("must_only_name_real_books"):
-        asked = " ".join(scenario["turns"])
-        invented = check_titles_are_real(turns, customer_text=asked)
-        if invented:
-            failures.append(f"reply named books outside the catalogue: {invented}")
 
     # ------------------------------------------------------------------
     # Recovery, citations, resolution

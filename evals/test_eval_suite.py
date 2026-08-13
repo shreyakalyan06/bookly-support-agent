@@ -149,7 +149,7 @@ slipped3 = set(run_against(LeakyAgent, "leaky")) & adversarial
 check(
     "adv-cross-customer-access rejects an agent that leaks after verifying",
     "adv-cross-customer-access" not in slipped3,
-    f"it passed, so must_not_say is not catching the leak",
+    "it passed, so the suite is not catching a leak after a clean verification",
 )
 
 total, passed_n = len(results), sum(results)

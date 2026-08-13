@@ -18,8 +18,8 @@ pip install -r requirements.txt
 export ANTHROPIC_API_KEY=sk-ant-...
 
 python cli.py --trace                        # chat, with the tool calls shown
-python evals/test_control_layer.py           # 46 checks, no API key needed
-python evals/run_scenarios.py --repeats 3    # 13 conversations, needs a key
+python evals/test_control_layer.py           # 56 checks, no API key needed
+python evals/run_scenarios.py --repeats 3    # 14 conversations, needs a key
 ```
 
 | Customer | Credentials | Orders |
@@ -73,7 +73,7 @@ policy.py      keyword retrieval with a relevance cutoff
 
 **The refund limits get a check in code as well as a line in the prompt.** Costs
 flexibility: a fair exception gets blocked and needs a person. Worth it because a
-refund does not come back, and 46 offline checks prove the limits hold without
+refund does not come back, and 56 offline checks prove the limits hold without
 spending anything on the API. The prompt still owns how the agent explains the
 refusal, which is the part that should change often.
 
@@ -96,8 +96,8 @@ call, so they are free, repeatable, and every suggestion carries a reason.
 
 ## Testing
 
-The permission layer gets 46 plain assertions and no API key, because none of it
-touches the model. The conversations get 13 scenarios, six of them attacks.
+The permission layer gets 56 plain assertions and no API key, because none of it
+touches the model. The conversations get 14 scenarios, six of them attacks.
 Assertions read the trace rather than the wording of the reply, because the
 wording changes every run and the trace does not.
 
@@ -122,6 +122,16 @@ know from the data. And an assertion naming one correct path will eventually mee
 the other one, which happened to me eight times.
 
 Results in `evals/results/`.
+
+The full suite is 42 real conversations and takes about ten minutes. Almost all of
+that is waiting on the model, roughly fourteen seconds a conversation. While
+iterating, use `--repeats 1` for three minutes, or `--only adv` for one group, and
+save the three-repeat run for before you commit.
+
+It runs one at a time on purpose. Parallel runs needed each worker to have its own
+copy of the order data, and that copy was what let the same refund succeed once per
+worker. Faster and unsound is not a trade worth making in the file whose job is
+proving the refund path holds.
 
 **On the score.** Thirteen scenarios at three repeats. A clean sweep means no
 failures observed, which is not the same as no failures possible, and thirteen
@@ -151,6 +161,13 @@ outlives a conversation.
 **Nothing survives the process.** Sessions are in memory, orders are a module dict,
 and every conversation appends to one trace file. No horizontal scaling story beyond
 sticky sessions.
+
+**`recommend_books` used to take `use_purchase_history`, and I cut it.** With that
+flag the same tool read a customer's orders, so its risk followed the arguments
+rather than the name, and the dispatcher only sees the name. Splitting the tool or
+making dispatch argument-aware both work. Cutting the flag was the cheaper honest
+option and it kept the tier table true. "Same function, two risk levels" was the
+sharper observation and it is the thing I would put back first.
 
 **The prompt and the caps are not config.** The prompt is a string literal in
 `agent.py` and the cap is a module constant, so only an engineer can change either.
@@ -198,7 +215,7 @@ Then give a check to the two behaviours that only have a line of text. The agent
 names only stocked books, and it offers an alternative after a refusal. Both hold
 today, and so did the refund instruction before I gave it a check.
 
-Then replay real conversations rather than my thirteen invented ones, since eight
+Then replay real conversations rather than my fourteen invented ones, since eight
 of my assertions were wrong. Then a durable store, which gives cross-conversation
 verification, a rolling per-customer refund total, and a trace that survives a
 restart, all from the same change. Then the per-customer refund total. Then gate releases on the
