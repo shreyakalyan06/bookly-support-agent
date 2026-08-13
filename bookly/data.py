@@ -45,7 +45,7 @@ CUSTOMERS = {
 #   ORD-84315  still in transit           cannot be returned YET
 #   ORD-79930  delivered 104 days ago     too late to return
 #   ORD-84420  delivered, £342            too expensive to refund unsupervised
-#   ORD-84501  return already running     cannot return the same thing twice
+#   ORD-84501  one item already returned  cannot return the same ITEM twice
 #
 # Priya has two orders open at once. That is deliberate: it means "where is my
 # order" has no single right answer, so the agent has to ask which one.
@@ -65,7 +65,7 @@ _ORDER_FIXTURES = {
             {"item_id": "ITM-1", "title": "The Fifth Season", "qty": 1, "price_pence": 999},
             {"item_id": "ITM-2", "title": "Piranesi", "qty": 1, "price_pence": 1499},
         ],
-        "return_status": None,
+        "returned_item_ids": [],
     },
     "ORD-84315": {
         "order_id": "ORD-84315",
@@ -95,7 +95,7 @@ _ORDER_FIXTURES = {
         "items": [
             {"item_id": "ITM-1", "title": "Babel", "qty": 1, "price_pence": 1850},
         ],
-        "return_status": None,
+        "returned_item_ids": [],
     },
     "ORD-79930": {
         "order_id": "ORD-79930",
@@ -111,7 +111,7 @@ _ORDER_FIXTURES = {
             {"item_id": "ITM-1", "title": "Sea of Tranquility", "qty": 1, "price_pence": 1600},
             {"item_id": "ITM-2", "title": "Klara and the Sun", "qty": 1, "price_pence": 1500},
         ],
-        "return_status": None,
+        "returned_item_ids": [],
     },
     "ORD-84420": {
         "order_id": "ORD-84420",
@@ -131,7 +131,7 @@ _ORDER_FIXTURES = {
                 "price_pence": 34200,
             },
         ],
-        "return_status": None,
+        "returned_item_ids": [],
     },
     "ORD-84501": {
         "order_id": "ORD-84501",
@@ -146,7 +146,7 @@ _ORDER_FIXTURES = {
         "items": [
             {"item_id": "ITM-1", "title": "Tomorrow, and Tomorrow, and Tomorrow", "qty": 1, "price_pence": 2200},
         ],
-        "return_status": "in_progress",
+        "returned_item_ids": ["ITM-1"],
     },
 }
 
@@ -288,8 +288,17 @@ def reset_state() -> None:
     A real deployment has a database and this file does not exist.
     """
     ORDERS.clear()
-    ORDERS.update({k: {**v, "items": [dict(i) for i in v["items"]]}
-                   for k, v in _ORDER_FIXTURES.items()})
+    ORDERS.update({
+        k: {**v,
+            "items": [dict(i) for i in v["items"]],
+            # Copy the list, do not share it. A shallow copy handed the fixture's
+            # own list to the live order, so the first return mutated the fixture
+            # for the rest of the process and every later run saw the item as
+            # already returned. That reads as exactly 1 pass in 3.
+            "returned_item_ids": list(v.get("returned_item_ids", [])),
+            }
+        for k, v in _ORDER_FIXTURES.items()
+    })
 
 
 reset_state()

@@ -11,9 +11,6 @@ The AI can only suggest books that are in here and in stock. It knows thousands
 of real books and would happily recommend one we have never sold, which creates
 a support problem rather than solving one.
 
-Reading groups are real objects with real dates and member counts. "Why not join
-our community" is not an offer. "Eleven people are discussing this on the 24th"
-is.
 """
 
 from datetime import date
@@ -231,8 +228,6 @@ CATALOGUE = {
 }
 
 
-# Reading groups. Each has a real next meeting and a real number of members,
-# because a vague invitation is not an invitation.
 
 # How we decide two books are alike. Just counting, no AI.
 #

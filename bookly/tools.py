@@ -203,7 +203,7 @@ def verify_customer(session: Session, email: str = "", postcode: str = "", **_):
         # Counted on the session only. Recording against the email in a durable
         # store let anyone lock any customer out by guessing at their address.
         session.verification_attempts += 1
-        remaining = Session.MAX_VERIFICATION_ATTEMPTS - session.verification_attempts
+        remaining = guardrails.MAX_VERIFICATION_ATTEMPTS - session.verification_attempts
         return (
             {
                 "ok": False,
@@ -373,12 +373,9 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
     if order is None or item is None or not owned.permitted:
         d = guardrails.Decision(False, "ownership.mismatch", NOT_FOUND)
         return _refusal(d), d.as_dict(), []
-
-    # An idempotency key derived from the request, not from mutated mock state.
-    # Without this, a duplicate depends on the in-process dict having been
-    # changed, so a restart or a second worker would let the same refund through
-    # twice.
-    decision = guardrails.authorise_return(session, order, pence=item["price_pence"])
+    decision = guardrails.authorise_return(
+        session, order, item_id=item_id, pence=item["price_pence"]
+    )
 
     if not decision.permitted:
         payload = _refusal(decision)
@@ -393,7 +390,7 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
         return payload, decision.as_dict(), []
 
     # Mutate the mock store so the duplicate-return guard is real on a second attempt.
-    order["return_status"] = "in_progress"
+    order.setdefault("returned_item_ids", []).append(item_id)
 
     session.actions_taken.append(
         {"action": "initiate_return", "order_id": order_id, "item_id": item_id,
