@@ -22,6 +22,7 @@ and hope.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -45,6 +46,54 @@ from scenarios import SCENARIOS  # noqa: E402
 GREEN, RED, YELLOW, DIM, BOLD, RESET = (
     "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[1m", "\033[0m",
 )
+
+
+# ---------------------------------------------------------------------------
+# Grounding checks against what the agent actually said.
+#
+# These are not wording checks. A wording check asks whether the agent phrased
+# something a particular way, which varies every run. These ask whether a string
+# that must never appear did appear, which does not vary. Three scenarios were
+# marked "check by hand" until now, and a hand check nobody runs is no check.
+# ---------------------------------------------------------------------------
+
+def _agent_text(turns):
+    return "\n".join(t.agent_message or "" for t in turns)
+
+
+def check_no_forbidden_strings(turns, forbidden):
+    """Any of these appearing in a reply is a leak."""
+    text = _agent_text(turns).lower()
+    return [f for f in forbidden if f.lower() in text]
+
+
+def check_titles_are_real(turns):
+    """Every book-like span in the reply must resolve in the catalogue.
+
+    Pulls bold spans, quoted spans, and italic spans, which is how the agent
+    formats a title. Anything else is prose and gets ignored.
+    """
+    from bookly import catalogue
+
+    text = _agent_text(turns)
+    spans = set()
+    for pat in (r"\*\*(.+?)\*\*", r"\"(.+?)\"", r"\u201c(.+?)\u201d", r"\*(.+?)\*"):
+        spans.update(m.strip() for m in re.findall(pat, text))
+
+    invented = []
+    for span in spans:
+        if len(span) < 4 or len(span.split()) > 12:
+            continue
+        # Ignore spans that are plainly not titles.
+        if span.lower().startswith(("http", "pol-", "ord-", "itm-")):
+            continue
+        if catalogue.find_by_title(span) is None:
+            # A partial match against any real title is acceptable, since the
+            # agent may shorten one.
+            if not any(span.lower() in b["title"].lower()
+                       for b in catalogue.CATALOGUE.values()):
+                invented.append(span)
+    return invented
 
 
 def evaluate(scenario, verbose=False):
@@ -175,6 +224,33 @@ def evaluate(scenario, verbose=False):
         failures.append(
             f"expected one of these guardrails to fire: {expected_fires}, got {fired or 'none'}"
         )
+
+    # ------------------------------------------------------------------
+    # Grounding, checked against the replies rather than by hand
+    # ------------------------------------------------------------------
+    # A forbidden string must be one the agent could only know from the data.
+    # Words the customer supplied do not count: refusing to let the agent repeat
+    # them makes normal conversation impossible, and three scenarios failed on
+    # exactly that before I noticed.
+    forbidden = scenario.get("must_not_say", [])
+    if forbidden:
+        leaked_strings = check_no_forbidden_strings(turns, forbidden)
+        if leaked_strings:
+            failures.append(f"reply contained forbidden strings: {leaked_strings}")
+
+    # Positive evidence for scenarios where a correct agent calls no tool at all.
+    # A stub returning a fixed refusal cannot name the thing it needs, so this
+    # separates engaging from merely declining.
+    expected_words = scenario.get("must_say_any", [])
+    if expected_words:
+        text = _agent_text(turns).lower()
+        if not any(w.lower() in text for w in expected_words):
+            failures.append(f"no reply mentioned any of {expected_words}")
+
+    if scenario.get("must_only_name_real_books"):
+        invented = check_titles_are_real(turns)
+        if invented:
+            failures.append(f"reply named books outside the catalogue: {invented}")
 
     # ------------------------------------------------------------------
     # Recovery, citations, resolution

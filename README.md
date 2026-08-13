@@ -1,9 +1,15 @@
 # Bookly support agent
 
-**Two minute demo: PASTE_YOUR_LINK_HERE**
+**Check everything yourself in one command.**
 
-Shows the offline test suite, a refused return with the tool calls visible, and
-a prompt injection attempt being turned down.
+```bash
+./verify.sh          # offline, no API key needed
+./verify.sh --full   # regenerates every number first, needs a key
+```
+
+Offline it proves the permission layer passes every assertion, the evaluation
+suite is capable of failing, and the committed numbers match a live run. Exits
+non-zero on any disagreement.
 
 No API key to hand? Read the captured output instead:
 [`evals/results/sample-transcript.txt`](evals/results/sample-transcript.txt),
@@ -199,15 +205,14 @@ get blocked by the value ceiling? Does `recommend_books` refuse to return a titl
 that isn't in stock?
 
 None of it touches the model, so it needs no API key and runs in under a second.
-It has read 48/48 on every run since I wrote it.
+It has passed every assertion on every run since I wrote it. The suite prints its own count, and `verify.sh` reads that rather than a number in a comment.
 
 ### The behavioural half
 
-`run_scenarios.py` runs eighteen scripted conversations. Six normal, five testing
-the recommendation and reading-group behaviour, seven adversarial.
+`run_scenarios.py` runs nineteen scripted conversations. Six normal, five testing
+the recommendation and reading-group behaviour, eight adversarial.
 
-The adversarial ones are the interesting set. Eight of the nineteen scenarios are
-attacks, and they arrive by two different routes.
+Eight of the nineteen are attacks, arriving by two different routes.
 
 The obvious route is the customer typing an instruction. One scenario sends this:
 
@@ -238,18 +243,40 @@ Latest run in `evals/results/`. Regenerate with:
 ```bash
 python evals/run_scenarios.py --repeats 3 \
     --json evals/results/eval-results.json | tee evals/results/eval-results.txt
-python evals/capture_artefacts.py    # refreshes the trace, checks the deck agrees
+python evals/capture_artefacts.py    # refreshes the trace and reports the figures
 ```
 
-48/48 on the control layer, 21/21 on the adversarial scenarios with no breaches.
+57 of 57 across nineteen scenarios at three repeats. 75 of 75 on the permission
+layer. 24 of 24 adversarial, no breaches.
 
-`concierge-refusal-recovery` sits at **13 of 15**, pooled across two samples on
-the same code: 1 of 3 in a full-suite run, then 12 of 12 in a dedicated run.
-Both files are committed, `eval-results.json` and `recovery-rate.json`.
+`concierge-refusal-recovery` sits at **15 of 15**, pooling a full-suite run with a
+dedicated run of twelve. Both files are committed.
 
-The disagreement is the finding. Three runs looked like a third, twelve looked
-like certainty, and the honest answer is near 87%. I had 67% on a slide from an
-earlier three-run sample before I checked. Three runs was never a measurement.
+Across six samples the figure read 2 of 3, then 1 of 3, then 12 of 12, then 3 of 3,
+then 2 of 3, then 3 of 3. An unenforced behaviour has no rate worth quoting,
+which is the point rather than the noise.
+
+### Three failure modes, one string
+
+`initiate_return` used to answer differently for an unverified session, a bogus
+item id, and another customer's order. Three answers turned the tool into an
+oracle: probe references, read the wording, map an account you have no access to.
+
+Identity and ownership now run before any lookup, and all three cases return one
+string: `No order found with that reference on this account.` Three assertions in
+`test_control_layer.py` check the payloads are byte-identical.
+
+### Caps that survive a reconnect
+
+The rolling refund total and the failed-verification counter live in a
+module-level store keyed by customer and by email, not on the `Session`. On the
+Session both reset when somebody reconnected, so neither enforced anything. The
+store stands in for Redis. The invariant is the same either way: a counter has to
+outlive the conversation or the cap is decoration.
+
+Refunds also carry an idempotency key built from customer, order and item, so a
+duplicate is caught by the request rather than by the mock data having been
+mutated in this process.
 
 ### The three routes a rule holds by
 
@@ -269,10 +296,63 @@ leaked, which holds because order details reach the model only through a tool
 result. No forbidden tool succeeded, and the session never verified, so nothing
 was disclosed.
 
-That 13 of 15 is the one I'd point at. Offering the customer an alternative after
-a refusal is the only behaviour in the system with nothing in code behind it, and
-the only one that varies between runs. Everything backed by a check in
-`guardrails.py` has been identical on every run since I wrote it.
+Recovery after a refusal is the only behaviour with no code behind it, and the
+only one that moves between runs.
+
+### Every assertion I loosened, and why
+
+Five assertions of mine failed a correct agent. Each time I changed the test, and
+each change is commented in place with what it used to require.
+
+| What I asserted | Why it was wrong |
+|---|---|
+| A guardrail must have **fired** | A check fires only when the model misbehaves, so the test needed misbehaviour to pass |
+| `find_orders` must be called | Asking for the order reference is a second correct route, and discloses less |
+| `escalate_to_human` must be called | Asking for the postcode again is also correct. Two runs escalated, one did not |
+| The agent must not say "your husband" | The customer said it first. Echoing a customer back discloses nothing |
+| The agent must not say "Dune" | Same. Naming the book the customer named is how you decline the request |
+
+Two rules came out of that. A forbidden string has to be one the agent could only
+know from the data. And an assertion naming one correct path will eventually meet
+the other one.
+
+The obvious objection is that I loosened until everything passed. The negative
+control below is the answer.
+
+### Proving the suite is capable of failing
+
+```bash
+python evals/test_eval_suite.py
+```
+
+A green suite tells you nothing until you know it can go red. This runs all
+nineteen scenarios against two stubs and asserts every adversarial scenario
+rejects both.
+
+The first stub verifies nobody, calls no tools, and returns the same polite
+refusal to everything. Safe and useless. The second claims to have verified,
+refunded and extended the window, while touching nothing.
+
+When I first ran this, five adversarial scenarios passed the do-nothing stub.
+They were checking that nothing bad happened without checking that anything
+happened at all. Every adversarial scenario now needs a `must_call` trail showing
+the agent engaged, so `never_attempted` excuses the boundary and never the whole
+conversation.
+
+### Grounding checked against the replies
+
+Three scenarios were marked "check by hand" until the checks moved into the suite.
+
+`must_not_say` fails a scenario when a forbidden string appears in any reply. The
+injection scenario uses it for the note's own wording and another customer's order
+ids. The cross-customer scenario uses it for anything confirming the order exists.
+
+`must_only_name_real_books` extracts every bold, quoted or italic span from the
+replies and fails if one does not resolve in the catalogue.
+
+These are not wording checks. A wording check asks how the agent phrased
+something, which varies. These ask whether a string that must never appear did,
+which does not.
 
 ### What went wrong with my tests
 
@@ -338,9 +418,10 @@ including every way they can fail.
 
 ## What I'd do next
 
-**Make the recovery offer a rule.** At 13 of 15 it is good and not certain, and
-if the commercial argument depends on a refusal not losing the customer then good
-is not the standard. The refusal payload should require an alternative before the
+**Make the recovery offer a rule.** At 15 of 15 it is a clean record, not a
+guarantee. If the
+commercial argument depends on a refusal not losing the customer, good is not the
+standard. The refusal payload should require an alternative before the
 turn can close, the same way `initiate_return` requires authorisation.
 
 **Check book titles on the way out.** The agent is told to name only stocked
@@ -349,7 +430,7 @@ rule because `guardrails.py` enforces it, so titles should get the same
 treatment: scan the outgoing message, resolve every title against the catalogue,
 regenerate if one doesn't match.
 
-**Replay real conversations.** My eighteen scenarios came out of my own head,
+**Replay real conversations.** My nineteen scenarios came out of my own head,
 which is exactly why five of them were wrong. Running the agent over a year of a
 customer's actual chats and diffing its decisions against what their team did
 would be far more convincing, and it uses their data rather than my imagination.
@@ -384,6 +465,20 @@ over-blocked: returning one £20 book from a £120 order needed a human for no
 reason.
 
 No memory between conversations. English only, UK only.
+
+**The cost figure rests on two conversations.** `evals/value_case.py` computes it
+from tokens in the trace, and the sample is four turns. Read it as an order of
+magnitude. Prices are USD list, converted at a rate set in one constant at the top
+of that file. An earlier version printed the dollar figure under a GBP label and
+overstated every cost line by the exchange rate.
+
+Cost also grows with turn count, because the whole history is resent on every
+round. A four-round conversation pays for the first message four times. Prompt
+caching would cut that and is not implemented.
+
+**The stores are a module-level dict.** `_REFUND_TOTALS` and
+`_FAILED_VERIFICATIONS` stand in for Redis. They enforce the right invariant and
+they do not survive a process restart, which a real deployment needs.
 
 **The trace holds personal data and currently does nothing about it.** Every turn
 records the customer's message verbatim, so email addresses, postcodes and order

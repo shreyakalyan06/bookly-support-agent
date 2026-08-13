@@ -32,10 +32,12 @@ RETURN_WINDOW_DAYS = 30
 # order total.
 AUTO_REFUND_CAP_GBP = 100.00
 
-# Per customer, per conversation. Without this, four separate GBP 75 refunds each
-# pass the per-refund cap and GBP 300 leaves unsupervised. One cap limits a
-# decision. You also need one that limits a sequence.
+# Per customer, rolling. Without this, four separate GBP 75 refunds each pass the
+# per-refund cap and GBP 300 leaves unsupervised. One cap limits a decision. You
+# also need one limiting a sequence, and it has to survive a reconnect.
 AUTO_REFUND_SESSION_CAP_GBP = 150.00
+
+
 IDENTITY_REQUIRED_FOR = {"find_orders", "get_order", "initiate_return"}
 
 
@@ -102,6 +104,9 @@ class Session:
     # Money already approved in this conversation. Read by check_refund_value,
     # written by initiate_return only after a refund actually succeeds.
     refunded_so_far: float = 0.0
+    # Idempotency keys for refunds already completed, so a duplicate does not
+    # depend on the mock data having been mutated in this process.
+    completed_returns: set = field(default_factory=set)
 
     MAX_VERIFICATION_ATTEMPTS = 3
 
@@ -109,6 +114,38 @@ class Session:
 # --------------------------------------------------------------------------
 # Checks
 # --------------------------------------------------------------------------
+
+
+# with a rolling window. The invariant is the same either way: the counter has
+# to outlive the conversation or the cap is decoration.
+_REFUND_TOTALS: dict[str, float] = {}
+_FAILED_VERIFICATIONS: dict[str, int] = {}
+
+
+def refunded_by(customer_id: Optional[str]) -> float:
+    """Money already approved for this customer, across conversations."""
+    return _REFUND_TOTALS.get(customer_id or "", 0.0)
+
+
+def record_refund(customer_id: Optional[str], amount: float) -> None:
+    key = customer_id or ""
+    _REFUND_TOTALS[key] = _REFUND_TOTALS.get(key, 0.0) + amount
+
+
+def failed_verifications(identifier: str) -> int:
+    """Failed attempts against this email, across conversations."""
+    return _FAILED_VERIFICATIONS.get((identifier or "").strip().lower(), 0)
+
+
+def record_failed_verification(identifier: str) -> None:
+    key = (identifier or "").strip().lower()
+    _FAILED_VERIFICATIONS[key] = _FAILED_VERIFICATIONS.get(key, 0) + 1
+
+
+def reset_stores() -> None:
+    """Clear both counters. Tests call this. Production would not."""
+    _REFUND_TOTALS.clear()
+    _FAILED_VERIFICATIONS.clear()
 
 
 def check_identity(session: Session, tool_name: str) -> Decision:
@@ -124,6 +161,50 @@ def check_identity(session: Session, tool_name: str) -> Decision:
             "before accessing any order data.",
         )
     return Decision(True, "identity.verified", f"Verified as {session.verified_customer_id}.")
+
+
+# What the dispatcher must run before each tool, by name.
+#
+# Until now the tiers were a description and enforcement was a convention: each
+# handler remembered to call its own checks. A convention fails open. Add a tool
+# and forget the check, and nothing complains.
+#
+# agent.py consults this table before calling any handler. A tool absent from the
+# table is refused, so the next tool someone adds fails closed. A test walks
+# HANDLERS and fails if any name is missing here.
+TOOL_POLICY: dict[str, tuple[str, ...]] = {
+    "verify_customer":    (),
+    "search_policy":      (),
+    "recommend_books":    (),
+    "find_book_clubs":    (),
+    "escalate_to_human":  (),
+    "find_orders":        ("identity",),
+    "get_order":          ("identity",),
+    "initiate_return":    ("identity",),
+}
+
+
+def check_dispatch(session: Session, tool_name: str) -> Decision:
+    """
+    Gate every tool call before the handler runs.
+
+    Returns the first failure. Handlers still run their own checks, because the
+    ones needing the order or the amount cannot be resolved from a tool name
+    alone. This layer catches the case a handler forgets.
+    """
+    required = TOOL_POLICY.get(tool_name)
+    if required is None:
+        return Decision(
+            False,
+            "dispatch.unknown_tool",
+            f"No policy defined for '{tool_name}'. Refusing rather than guessing.",
+        )
+    for name in required:
+        if name == "identity":
+            d = check_identity(session, tool_name)
+            if not d.permitted:
+                return d
+    return Decision(True, "dispatch.permitted", f"Policy satisfied for {tool_name}.")
 
 
 def check_ownership(session: Session, order: dict) -> Decision:
@@ -147,8 +228,20 @@ def check_ownership(session: Session, order: dict) -> Decision:
     return Decision(True, "ownership.ok", "Order belongs to the verified customer.")
 
 
-def check_verification_attempts(session: Session) -> Decision:
-    """Stop someone sitting there guessing postcodes until one works."""
+def check_verification_attempts(session: Session, email: str = "") -> Decision:
+    """
+    Stop someone guessing postcodes until one works.
+
+    Counts against the email, in a store outliving the conversation. The old
+    version counted on the Session, so reconnecting reset the counter and the
+    guard did nothing.
+    """
+    if failed_verifications(email) >= Session.MAX_VERIFICATION_ATTEMPTS:
+        return Decision(
+            False,
+            "identity.attempts_exceeded",
+            "Too many failed verification attempts. Hand off to a human agent.",
+        )
     if session.verification_attempts >= Session.MAX_VERIFICATION_ATTEMPTS:
         return Decision(
             False,
@@ -234,13 +327,14 @@ def check_refund_value(
         )
 
     if session is not None:
-        running = session.refunded_so_far + amount
+        # Durable total, not the per-Session one. A reconnect used to reset this.
+        running = refunded_by(session.verified_customer_id) + amount
         if running > AUTO_REFUND_SESSION_CAP_GBP:
             return Decision(
                 False,
                 "refund.above_session_cap",
-                f"A refund of {cur} {amount:.2f} would take this conversation to "
-                f"{cur} {running:.2f}, over the per-conversation limit of "
+                f"A refund of {cur} {amount:.2f} would take this customer to "
+                f"{cur} {running:.2f}, over the rolling limit of "
                 f"GBP {AUTO_REFUND_SESSION_CAP_GBP:.2f}. Requires human approval.",
             )
 

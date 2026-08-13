@@ -28,6 +28,7 @@ from typing import Optional
 
 from anthropic import Anthropic
 
+from . import guardrails
 from .guardrails import Session
 from .tools import HANDLERS, TOOL_SCHEMAS
 from .trace import ToolEvent, Tracer
@@ -39,6 +40,10 @@ MODEL = os.environ.get("BOOKLY_MODEL", "claude-sonnet-5")
 # The normal path is four rounds: verify, find the order, read it, act.
 # Eight leaves room for one retry.
 MAX_ITERATIONS = 8
+
+# One retry on a transient failure, and a ceiling on how long a customer waits.
+API_TIMEOUT_SECONDS = 30.0
+RETRY_DELAY_SECONDS = 1.0
 
 
 SYSTEM_PROMPT = """You are the Bookly customer support assistant. Bookly is an online bookstore in the UK.
@@ -167,7 +172,57 @@ class BooklyAgent:
             return "clarifying"
         return "answered"
 
+    def _call_model(self):
+        """One API call, with a timeout and a single retry.
+
+        A transient network failure should not end a customer's conversation, and
+        an indefinite hang should not hold the line open either.
+        """
+        last = None
+        for attempt in (1, 2):
+            try:
+                return self.client.messages.create(
+                    model=MODEL,
+                    max_tokens=1024,
+                    system=SYSTEM_PROMPT,
+                    tools=TOOL_SCHEMAS,
+                    messages=self.messages,
+                    timeout=API_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                if attempt == 2:
+                    raise
+                time.sleep(RETRY_DELAY_SECONDS)
+        raise last  # unreachable, kept explicit
+
     def _run_tool(self, turn, name: str, arguments: dict):
+        # Policy first, before the handler exists as far as this method cares.
+        #
+        # Enforcement used to be a convention: every handler remembered to call
+        # its own checks. A convention fails open. Add a tool, forget the check,
+        # and nothing complains. Now a tool absent from guardrails.TOOL_POLICY is
+        # refused here, so the next tool someone adds fails closed.
+        gate = guardrails.check_dispatch(self.session, name)
+        if not gate.permitted:
+            payload = {
+                "ok": False,
+                "refused": True,
+                "rule": gate.rule,
+                "reason": gate.reason,
+            }
+            self.tracer.record_tool(
+                turn,
+                ToolEvent(
+                    tool_name=name,
+                    arguments=arguments,
+                    guardrail=gate.as_dict(),
+                    outcome="refused",
+                    result_summary=gate.reason,
+                ),
+            )
+            return payload
+
         handler = HANDLERS.get(name)
         if handler is None:
             payload = {"ok": False, "reason": f"Unknown tool {name}."}
@@ -226,15 +281,49 @@ class BooklyAgent:
 
         final_text = ""
 
+        # Snapshot the history. An exception after we have appended an assistant
+        # tool_use block leaves the conversation malformed, and every later call
+        # 400s. Rolling back to this on failure keeps the session usable.
+        checkpoint = list(self.messages)
+
         for _ in range(MAX_ITERATIONS):
-            response = self.client.messages.create(
-                model=MODEL,
-                max_tokens=1024,
-                system=SYSTEM_PROMPT,
-                tools=TOOL_SCHEMAS,
-                messages=self.messages,
-            )
+            try:
+                response = self._call_model()
+            except Exception as exc:  # noqa: BLE001
+                self.messages = checkpoint
+                final_text = (
+                    "Something went wrong on my side. Let me pass you to a "
+                    "colleague."
+                )
+                self._run_tool(
+                    turn, "escalate_to_human",
+                    {"reason": f"model_call_failed: {exc}", "summary": customer_message},
+                )
+                self.tracer.end_turn(
+                    turn, agent_message=final_text, resolution="escalated",
+                    identity_verified=self.session.verified_customer_id is not None,
+                )
+                return final_text
+
             turn.model_stops += 1
+
+            # A truncated response has a half-formed tool request in it. Running
+            # that means acting on arguments the model never finished writing.
+            if getattr(response, "stop_reason", None) == "max_tokens":
+                self.messages = checkpoint
+                final_text = (
+                    "I got partway through that and lost the thread. Let me hand "
+                    "you to a colleague."
+                )
+                self._run_tool(
+                    turn, "escalate_to_human",
+                    {"reason": "response_truncated", "summary": customer_message},
+                )
+                self.tracer.end_turn(
+                    turn, agent_message=final_text, resolution="escalated",
+                    identity_verified=self.session.verified_customer_id is not None,
+                )
+                return final_text
             # Every round costs tokens. Summing them here is what lets the cost
             # per conversation be a measurement instead of an estimate.
             usage = getattr(response, "usage", None)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Not part of the agent. Tooling I wrote to keep the submission honest: it checks
-the repository and the deck against the committed results.
+the repository against its own committed results.
 
 Pre-submission audit. Runs offline, costs nothing.
 
@@ -9,7 +9,7 @@ Pre-submission audit. Runs offline, costs nothing.
 
 Checks what a reviewer will see:
   what is committed, and what is missing
-  whether the deck's claims match the committed results
+  whether the committed numbers agree with a live run
   whether anything private slipped in
   whether the placeholder demo link is still there
 """
@@ -21,6 +21,26 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+def control_layer_result():
+    """Run the offline suite and read its machine-readable count.
+
+    Nothing here hardcodes a number. An earlier version printed 48 / 48 from a
+    literal, which went stale the moment somebody added an assertion.
+    """
+    import re
+    import subprocess
+    import sys as _sys
+
+    proc = subprocess.run(
+        [_sys.executable, str(ROOT / "evals" / "test_control_layer.py")],
+        capture_output=True, text=True,
+    )
+    m = re.search(r"CONTROL_LAYER_RESULT passed=(\d+) total=(\d+)", proc.stdout)
+    if not m:
+        return None, None, proc.returncode
+    return int(m.group(1)), int(m.group(2)), proc.returncode
+
 OK, BAD, WARN = "  ok  ", "  FAIL", "  warn"
 problems = 0
 warnings = 0
@@ -64,6 +84,7 @@ expected = [
     "evals/scenarios.py", "evals/run_scenarios.py",
     "evals/test_control_layer.py", "evals/triage.py",
     "evals/capture_artefacts.py", "evals/audit_repo.py", "evals/value_case.py",
+    "evals/test_eval_suite.py", "evals/patch_scenarios.py", "verify.sh",
     "evals/results/eval-results.json", "evals/results/eval-results.txt",
 ]
 for f in expected:
@@ -118,7 +139,7 @@ check("no mention of the hiring company", "Decagon" not in readme)
 soft("demo link filled in", "PASTE_YOUR_LINK_HERE" not in readme,
      "still a placeholder at the top of the README")
 
-print("\nRESULTS AND DECK AGREEMENT")
+print("\nCOMMITTED RESULTS")
 rp = ROOT / "evals/results/eval-results.json"
 if not rp.exists():
     check("eval-results.json present", False, "run the suite first")
@@ -132,7 +153,13 @@ else:
     src = [s for v in d.values() for s in v.get("sources", [])]
     rec = d.get("concierge-refusal-recovery", {})
 
-    check("19 scenarios recorded", len(d) == 19, f"found {len(d)}")
+    # Read the count from scenarios.py rather than hardcoding it, so adding a
+    # scenario cannot leave this check quietly wrong.
+    import importlib
+    sys.path.insert(0, str(ROOT / "evals"))
+    expected_n = len(importlib.import_module("scenarios").SCENARIOS)
+    check(f"{expected_n} scenarios recorded", len(d) == expected_n,
+          f"found {len(d)}, scenarios.py defines {expected_n}")
     check("every adversarial run held", adv_passes == adv_runs,
           f"{adv_passes} of {adv_runs}")
 
@@ -142,11 +169,15 @@ else:
     }
     check("no unexplained failures", not unexpected, f"{list(unexpected)}")
 
-    print("\nNUMBERS FOR THE DECK")
+    print("\nTHE NUMBERS, REGENERATED")
     print("  " + "-" * 60)
     print(f"  overall                {passes} / {runs}  ({passes/runs:.0%})")
     print(f"  adversarial            {adv_passes} / {adv_runs}")
-    print(f"  control layer          48 / 48   (offline, unchanged)")
+    cl_pass, cl_total, cl_rc = control_layer_result()
+    if cl_total:
+        print(f"  control layer          {cl_pass} / {cl_total}   (offline, live run)")
+    else:
+        print("  control layer          could not read a result")
     if rec.get("runs"):
         print(f"  recovery               {rec['passes']} of {rec['runs']} runs"
               f"  ({rec['passes']/rec['runs']:.0%})")
@@ -166,12 +197,12 @@ else:
         print("  " + "-" * 60)
         print(f"  full suite             {rec['passes']} of {rec['runs']}")
         print(f"  dedicated run          {e.get('passes', 0)} of {e.get('runs', 0)}")
-        print(f"  pooled, for the deck   {pooled_p} / {pooled_r}"
+        print(f"  pooled                 {pooled_p} / {pooled_r}"
               f"  ({pooled_p/pooled_r:.0%})" if pooled_r else "")
         print("  " + "-" * 60)
         soft("recovery-rate.json committed",
              "evals/results/recovery-rate.json" in tracked,
-             "commit it, or the pooled figure on the deck has no source")
+             "commit it, or the pooled figure has no source")
 
     if pooled_r < 10:
         print(f"\n  {WARN.strip()}  The recovery figure rests on {pooled_r} runs.")

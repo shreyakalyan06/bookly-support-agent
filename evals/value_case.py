@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Not part of the agent. Tooling I wrote to keep the submission honest: it checks
-the repository and the deck against the committed results.
+the repository against its own committed results.
 
 Build the value case from measured data, not from guesses.
 
@@ -11,8 +11,8 @@ Reads two things:
   evals/results/sample-trace.jsonl   tokens and seconds per turn, from real runs
   evals/results/*.json               per-scenario timings from the eval runs
 
-Prints the numbers for the value slide, plus the arithmetic behind each, so you
-can defend any figure a reviewer questions.
+Prints each number with the arithmetic behind it, so any figure holds up when
+questioned.
 
 Change the assumptions below to match whatever a customer tells you. They are
 the only things here that are not measured.
@@ -35,9 +35,14 @@ COST_PER_HUMAN_CONTACT_GBP = 4.20  # loaded cost, UK, chat
 CONTAINMENT = 0.60                 # share the agent finishes alone
 AVG_REFUND_GBP = 22.00             # mean refund on a returned book
 
-# Published API pricing, per million tokens. Check before quoting.
-IN_PER_MTOK = 3.00
-OUT_PER_MTOK = 15.00
+# Published API pricing, per million tokens, in USD. Check before quoting.
+#
+# An earlier version printed these straight out under a GBP label, so every cost
+# line was overstated by the exchange rate. Convert once, here, and label the
+# output in one currency.
+IN_PER_MTOK_USD = 3.00
+OUT_PER_MTOK_USD = 15.00
+USD_TO_GBP = 0.79          # set this to today's rate before quoting anything
 
 
 def load_trace():
@@ -85,18 +90,27 @@ if turns:
         c["s"] += t.get("seconds", 0.0)
         c["n"] += 1
 
-    per_conv_cost = []
+    per_conv_cost, total_turns = [], 0
     for cid, c in convs.items():
-        cost = c["in"] / 1e6 * IN_PER_MTOK + c["out"] / 1e6 * OUT_PER_MTOK
-        per_conv_cost.append(cost)
+        usd = c["in"] / 1e6 * IN_PER_MTOK_USD + c["out"] / 1e6 * OUT_PER_MTOK_USD
+        gbp = usd * USD_TO_GBP
+        per_conv_cost.append(gbp)
+        total_turns += c["n"]
         print(f"  conversation {cid}   {c['n']} turns   "
               f"{c['in']:,} in / {c['out']:,} out tokens   "
-              f"{c['s']:.1f}s   GBP {cost:.4f}")
+              f"{c['s']:.1f}s   USD {usd:.4f}   GBP {gbp:.4f}")
 
     mean_cost = statistics.mean(per_conv_cost)
     print()
-    print(f"  cost per conversation, mean of {len(per_conv_cost)}    GBP {mean_cost:.3f}")
-    print(f"  arithmetic: tokens in / 1e6 x {IN_PER_MTOK} + tokens out / 1e6 x {OUT_PER_MTOK}")
+    print(f"  cost per conversation, GBP {mean_cost:.4f}")
+    print(f"  sample: {len(per_conv_cost)} conversations, {total_turns} turns. "
+          f"Small. Say so, or capture 20 first.")
+    print(f"  arithmetic: (in / 1e6 x {IN_PER_MTOK_USD} + out / 1e6 x "
+          f"{OUT_PER_MTOK_USD}) x {USD_TO_GBP}")
+    print()
+    print("  Cost rises with turn count, because the whole history is resent on")
+    print("  every round. A four-round conversation pays for the first message four")
+    print("  times. Prompt caching would cut this and is not implemented.")
 else:
     mean_cost = None
     print("  no sample-trace.jsonl yet. Run:")
@@ -104,11 +118,11 @@ else:
 
 if timings:
     print()
-    print(f"  scenario latency, {len(timings)} runs")
+    print(f"  latency, whole conversations, {len(timings)} runs")
     print(f"    p50   {pct(timings, 50):.1f}s")
     print(f"    p95   {pct(timings, 95):.1f}s")
     print(f"    max   {max(timings):.1f}s")
-    print("  a scenario is a whole conversation, so per turn is roughly half this")
+    print("  these are conversations of 1 to 3 turns, not single turns")
 else:
     print()
     print("  no timings found in evals/results/*.json")
@@ -134,6 +148,9 @@ if mean_cost is not None:
     print(f"  agent inference cost            GBP {agent_cost:,.0f} per month")
     print(f"  net before licence and build    GBP {human_saved - agent_cost:,.0f} per month")
     print(f"  inference is {agent_cost / human_saved:.1%} of the cost it displaces")
+    print()
+    print(f"  Inference scales with volume. The human cost avoided does not scale")
+    print(f"  perfectly, because containment falls on harder contacts.")
 
 print()
 print("EXPOSURE, the line to lead with")

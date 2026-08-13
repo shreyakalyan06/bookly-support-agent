@@ -23,7 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bookly import catalogue, data, guardrails, policy, tools  # noqa: E402
 from bookly.guardrails import Session  # noqa: E402
 
-data.reset_state()  # start from pristine fixtures regardless of run order
+data.reset_state()
+guardrails.reset_stores()  # order-independent: no counters carried in
 
 PASS, FAIL = "\033[32mPASS\033[0m", "\033[31mFAIL\033[0m"
 results = []
@@ -59,6 +60,10 @@ for _ in range(3):
     tools.verify_customer(s2, email="priya.raman@example.com", postcode="nope")
 payload, _, _ = tools.verify_customer(s2, email="priya.raman@example.com", postcode="SW1A 1AA")
 check("attempt limit blocks even a correct guess afterwards", payload.get("refused") is True)
+# That lockout is durable now, keyed on the email rather than the session. Clear
+# it, or every later block in this file finds Priya locked out. The stale tests
+# that failed here were the durable counter proving it works.
+guardrails.reset_stores()
 
 print("\nOwnership isolation")
 payload, _, _ = tools.get_order(s, order_id="ORD-84420")  # belongs to CUST-1002
@@ -90,11 +95,13 @@ check("rule is the value cap", payload.get("rule") == "refund.above_auto_cap", p
 check("model is told a human can still do it", payload.get("next_step") == "escalate_to_human")
 
 print("\nDuplicate return guard")
+guardrails.reset_stores()
 payload, _, _ = tools.initiate_return(s3, order_id="ORD-84501", item_id="ITM-1", reason="changed mind")
 check("order with return in progress is blocked",
       payload.get("rule") == "return.already_in_progress", payload)
 
 print("\nSuccessful action, then repeat")
+data.reset_state(); guardrails.reset_stores()
 s4 = Session()
 tools.verify_customer(s4, email="priya.raman@example.com", postcode="SW1A 1AA")
 payload, _, _ = tools.initiate_return(s4, order_id="ORD-84201", item_id="ITM-2", reason="duplicate copy")
@@ -149,21 +156,21 @@ check("with no amount given it falls back to the total and blocks",
       d.permitted is False, "conservative default")
 
 print("\nRefund caps: per conversation")
+guardrails.reset_stores()
 s9 = Session()
 s9.verified_customer_id = "CUST-1001"
-s9.refunded_so_far = 0.0
 small = {"order_id": "T", "customer_id": "CUST-1001", "status": "delivered",
          "delivered_date": data._days_ago(3), "currency": "GBP", "total": 75.00,
          "return_status": None,
          "items": [{"item_id": "ITM-1", "title": "x", "qty": 1, "price": 75.00}]}
 d = guardrails.check_refund_value(small, amount=75.00, session=s9)
 check("first GBP 75 refund allowed", d.permitted is True)
-s9.refunded_so_far = 75.00
+guardrails.record_refund("CUST-1001", 75.00)
 d = guardrails.check_refund_value(small, amount=75.00, session=s9)
 check("second GBP 75 allowed, total 150 is at the limit", d.permitted is True, d.reason)
-s9.refunded_so_far = 150.00
+guardrails.record_refund("CUST-1001", 75.00)
 d = guardrails.check_refund_value(small, amount=75.00, session=s9)
-check("third GBP 75 blocked, would take the session to 225",
+check("third GBP 75 blocked, would take the customer to 225",
       d.permitted is False and d.rule == "refund.above_session_cap", d.reason)
 check("the split-refund hole is closed",
       guardrails.AUTO_REFUND_SESSION_CAP_GBP < 4 * 75.00)
@@ -184,6 +191,75 @@ check("get_order and check_ownership now tell the same story",
       and "this account" in payload["reason"].lower()
       and "this account" in dec["reason"].lower(),
       f"tool={payload['reason']!r} guard={dec['reason']!r}")
+
+print("\nThe initiate_return oracle is closed")
+data.reset_state(); guardrails.reset_stores()
+sA = Session()
+p_unver, g_unver, _ = tools.initiate_return(sA, order_id="ORD-84201", item_id="ITM-1", reason="x")
+check("unverified attempt is refused with a guardrail attached",
+      p_unver.get("refused") is True and g_unver is not None)
+
+sB = Session()
+tools.verify_customer(sB, email="priya.raman@example.com", postcode="SW1A 1AA")
+p_item, g_item, _ = tools.initiate_return(sB, order_id="ORD-84201", item_id="ITM-99", reason="x")
+p_cross, g_cross, _ = tools.initiate_return(sB, order_id="ORD-84420", item_id="ITM-1", reason="x")
+p_gone, g_gone, _ = tools.initiate_return(sB, order_id="ORD-00000", item_id="ITM-1", reason="x")
+check("bogus item id and cross-customer order are byte-identical",
+      p_item == p_cross, f"{p_item} vs {p_cross}")
+check("nonexistent order matches both of those exactly",
+      p_gone == p_item, f"{p_gone} vs {p_item}")
+check("all three carry a guardrail decision",
+      all(g is not None for g in (g_item, g_cross, g_gone)))
+check("the wording never names the order or the item",
+      "ORD-" not in p_item["reason"] and "ITM-" not in p_item["reason"], p_item["reason"])
+
+print("\nDispatch fails closed")
+check("a tool absent from the policy table is refused",
+      guardrails.check_dispatch(Session(), "drop_database").rule == "dispatch.unknown_tool")
+missing = sorted(set(tools.HANDLERS) - set(guardrails.TOOL_POLICY))
+check("every handler appears in TOOL_POLICY", not missing, f"missing: {missing}")
+orphan = sorted(set(guardrails.TOOL_POLICY) - set(tools.HANDLERS))
+check("no policy entry without a handler", not orphan, f"orphaned: {orphan}")
+check("gated tools require identity at dispatch",
+      all(guardrails.check_dispatch(Session(), t).permitted is False
+          for t in ("find_orders", "get_order", "initiate_return")))
+check("open tools pass dispatch with no session",
+      all(guardrails.check_dispatch(Session(), t).permitted is True
+          for t in ("search_policy", "recommend_books", "find_book_clubs",
+                    "escalate_to_human", "verify_customer")))
+
+print("\nCaps survive a reconnect")
+data.reset_state(); guardrails.reset_stores()
+sC = Session()
+tools.verify_customer(sC, email="priya.raman@example.com", postcode="SW1A 1AA")
+tools.initiate_return(sC, order_id="ORD-84201", item_id="ITM-2", reason="dup")
+check("refund recorded against the customer, not the session",
+      guardrails.refunded_by("CUST-1001") == 14.99, guardrails.refunded_by("CUST-1001"))
+sD = Session()   # a brand new conversation, same customer
+tools.verify_customer(sD, email="priya.raman@example.com", postcode="SW1A 1AA")
+check("a fresh session still sees the earlier total",
+      guardrails.refunded_by(sD.verified_customer_id) == 14.99)
+
+guardrails.reset_stores()
+for _ in range(3):
+    tools.verify_customer(Session(), email="priya.raman@example.com", postcode="wrong")
+sE = Session()
+p_att, _, _ = tools.verify_customer(sE, email="priya.raman@example.com", postcode="SW1A 1AA")
+check("failed attempts count against the email across sessions",
+      p_att.get("refused") is True, p_att)
+guardrails.reset_stores()
+
+print("\nRefunds are idempotent by request, not by mutated state")
+data.reset_state(); guardrails.reset_stores()
+sF = Session()
+tools.verify_customer(sF, email="priya.raman@example.com", postcode="SW1A 1AA")
+first, _, _ = tools.initiate_return(sF, order_id="ORD-84201", item_id="ITM-1", reason="one")
+check("first refund succeeds", first.get("ok") is True, first)
+data.reset_state()   # wipe the mutated order, as a restart would
+again, gag, _ = tools.initiate_return(sF, order_id="ORD-84201", item_id="ITM-1", reason="two")
+check("the same request is refused even after the order state resets",
+      again.get("refused") is True and gag["rule"] == "return.already_in_progress", again)
+guardrails.reset_stores()
 
 print("\nTiered authority")
 check("refunds are tier 2", guardrails.tier_of("initiate_return") == 2)
@@ -239,4 +315,9 @@ check("agent instructed not to invent one", "invent" in payload["instruction"].l
 
 total, passed = len(results), sum(results)
 print(f"\n{passed}/{total} checks passed\n")
+
+# Machine-readable, so nothing downstream hardcodes the count. verify.sh and the
+# audit read this line rather than a literal somebody has to remember to update.
+print(f"CONTROL_LAYER_RESULT passed={passed} total={total}")
+
 sys.exit(0 if passed == total else 1)

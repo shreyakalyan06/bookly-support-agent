@@ -49,8 +49,8 @@ class TurnTrace:
     timestamp: str
     customer_message: str
     model_stops: int = 0                       # how many round trips the loop took
-    # Cost and latency, measured rather than estimated. The value case on the
-    # deck is built from these, so they belong in the record.
+    # Cost and latency, measured rather than estimated. evals/value_case.py reads
+    # these, so any figure quoted has a source in the record.
     input_tokens: int = 0
     output_tokens: int = 0
     seconds: float = 0.0

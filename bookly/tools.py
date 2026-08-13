@@ -216,7 +216,7 @@ def _refusal(decision: Decision):
 
 
 def verify_customer(session: Session, email: str = "", postcode: str = "", **_):
-    attempts_ok = guardrails.check_verification_attempts(session)
+    attempts_ok = guardrails.check_verification_attempts(session, email=email)
     if not attempts_ok.permitted:
         return _refusal(attempts_ok), attempts_ok.as_dict(), []
 
@@ -225,6 +225,7 @@ def verify_customer(session: Session, email: str = "", postcode: str = "", **_):
 
     if customer is None or customer["postcode"].replace(" ", "").upper() != postcode_norm:
         session.verification_attempts += 1
+        guardrails.record_failed_verification(email)
         remaining = Session.MAX_VERIFICATION_ATTEMPTS - session.verification_attempts
         return (
             {
@@ -288,7 +289,7 @@ def get_order(session: Session, order_id: str = "", **_):
     order = data.get_order(order_id)
     if order is None:
         return (
-            {"ok": False, "reason": f"No order found with reference {order_id}."},
+            {"ok": False, "reason": NOT_FOUND},
             gate.as_dict(),
             [],
         )
@@ -297,7 +298,7 @@ def get_order(session: Session, order_id: str = "", **_):
     if not owned.permitted:
         # Deliberately does not reveal that the order exists.
         return (
-            {"ok": False, "reason": f"No order found with reference {order_id} on this account."},
+            {"ok": False, "reason": NOT_FOUND},
             owned.as_dict(),
             [],
         )
@@ -374,20 +375,46 @@ def search_policy(session: Session, query: str = "", **_):
     )
 
 
-def initiate_return(session: Session, order_id: str = "", item_id: str = "", reason: str = "", **_):
-    order = data.get_order(order_id)
-    if order is None:
-        return ({"ok": False, "reason": f"No order found with reference {order_id}."}, None, [])
+# Every not-found path returns this exact string. Three cases used to give three
+# different answers, which turned the tool into an oracle: probe order ids and
+# item ids, read the wording, and map somebody else's account. The wording now
+# reveals nothing about which of the three happened.
+NOT_FOUND = "No order found with that reference on this account."
 
-    # Resolve the item BEFORE authorising, so the value check sees the money
-    # actually leaving rather than the whole order total.
-    item = next((i for i in order["items"] if i["item_id"] == item_id), None)
-    if item is None:
-        return (
-            {"ok": False, "reason": f"Item {item_id} is not on order {order_id}."},
-            None,
-            [],
+
+def initiate_return(session: Session, order_id: str = "", item_id: str = "", reason: str = "", **_):
+    # Identity and ownership run before any lookup, so a caller learns nothing
+    # from the shape of the failure.
+    gate = guardrails.check_identity(session, "initiate_return")
+    if not gate.permitted:
+        return _refusal(gate), gate.as_dict(), []
+
+    order = data.get_order(order_id)
+    item = (
+        next((i for i in order["items"] if i["item_id"] == item_id), None)
+        if order else None
+    )
+    owned = (
+        guardrails.check_ownership(session, order)
+        if order else guardrails.Decision(False, "ownership.mismatch", NOT_FOUND)
+    )
+
+    # One branch, one string, one rule, whichever of the three went wrong.
+    if order is None or item is None or not owned.permitted:
+        d = guardrails.Decision(False, "ownership.mismatch", NOT_FOUND)
+        return _refusal(d), d.as_dict(), []
+
+    # An idempotency key derived from the request, not from mutated mock state.
+    # Without this, a duplicate depends on the in-process dict having been
+    # changed, so a restart or a second worker would let the same refund through
+    # twice.
+    key = f"{session.verified_customer_id}:{order_id}:{item_id}"
+    if key in session.completed_returns:
+        d = guardrails.Decision(
+            False, "return.already_in_progress",
+            "A return has already been started for that item.",
         )
+        return _refusal(d), d.as_dict(), []
 
     decision = guardrails.authorise_return(session, order, amount=item["price"])
 
@@ -408,6 +435,8 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
     # Only count money that actually moved. Written here, read by
     # check_refund_value on the next attempt in this conversation.
     session.refunded_so_far += item["price"]
+    guardrails.record_refund(session.verified_customer_id, item["price"])
+    session.completed_returns.add(key)
     session.actions_taken.append(
         {"action": "initiate_return", "order_id": order_id, "item_id": item_id,
          "reason": reason, "amount": item["price"]}
