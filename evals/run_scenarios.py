@@ -121,10 +121,6 @@ def evaluate(scenario, verbose=False):
     # return leaves the order marked, and the next run of the same scenario gets
     # blocked as a duplicate. That looks exactly like the agent failing.
     data.reset_state()
-    # The refund totals and completed-refund keys outlive a conversation by
-    # design, which means they also leak between scenarios. Without this reset the
-    # rolling cap accumulates across unrelated runs and a later scenario refuses
-    # for a reason that has nothing to do with it.
     agent = BooklyAgent(trace_path=None)
     transcript = []
 

@@ -115,25 +115,51 @@ check("a £342 item needs a person", payload.get("rule") == "refund.above_auto_c
 check("and the model is told a colleague can still do it",
       payload.get("next_step") == "escalate_to_human")
 
-print("\nA completed return cannot be repeated")
+print("\nReturns are per item, not per order")
 s = verified()
 first, _, _ = tools.initiate_return(s, order_id="ORD-84201", item_id="ITM-2", reason="dup")
-check("the first one succeeds", first.get("ok") is True, first)
+check("the first book goes back", first.get("ok") is True, first)
 check("the amount is the item price in pence, not the order total",
       first.get("refund_pence") == 1499, first.get("refund_pence"))
+second, _, _ = tools.initiate_return(s, order_id="ORD-84201", item_id="ITM-1", reason="also")
+check("the other book from the same order also goes back",
+      second.get("ok") is True, second)
 again, _, _ = tools.initiate_return(s, order_id="ORD-84201", item_id="ITM-1", reason="again")
-check("a second return on the same order is blocked",
+check("but the same item twice is blocked",
       again.get("rule") == "return.already_in_progress", again)
+
+print("\nreset_state fully isolates the fixtures")
+data.reset_state()
+live, fixture = data.ORDERS["ORD-84201"], data._ORDER_FIXTURES["ORD-84201"]
+aliased = [k for k in live
+           if isinstance(live[k], (list, dict, set)) and live[k] is fixture.get(k)]
+check("no mutable field is shared with the fixture", not aliased, aliased)
+s = verified()
+tools.initiate_return(s, order_id="ORD-84201", item_id="ITM-1", reason="x")
+check("a completed return does not leak into the fixture",
+      fixture.get("returned_item_ids") == [], fixture.get("returned_item_ids"))
+data.reset_state()
+s = verified()
+repeat, _, _ = tools.initiate_return(s, order_id="ORD-84201", item_id="ITM-1", reason="x")
+check("so the same scenario passes twice in a row", repeat.get("ok") is True, repeat)
 
 print("\nDispatch fails closed")
 check("a tool with no policy entry is refused",
       guardrails.check_dispatch(Session(), "drop_everything").rule == "dispatch.unknown_tool")
-check("every handler has a policy entry",
-      not set(tools.HANDLERS) - set(guardrails.TOOL_POLICY),
-      sorted(set(tools.HANDLERS) - set(guardrails.TOOL_POLICY)))
-check("every policy entry has a handler",
-      not set(guardrails.TOOL_POLICY) - set(tools.HANDLERS),
-      sorted(set(guardrails.TOOL_POLICY) - set(tools.HANDLERS)))
+check("every handler has a tier",
+      not set(tools.HANDLERS) - set(guardrails.ACTION_TIERS),
+      sorted(set(tools.HANDLERS) - set(guardrails.ACTION_TIERS)))
+check("every tier entry has a handler",
+      not set(guardrails.ACTION_TIERS) - set(tools.HANDLERS),
+      sorted(set(guardrails.ACTION_TIERS) - set(tools.HANDLERS)))
+check("every check name a tier asks for actually exists",
+      all(n in {"identity", "not_escalated"}
+          for names in guardrails.TIER_CHECKS.values() for n in names),
+      guardrails.TIER_CHECKS)
+check("refunds stop once the conversation goes to a person",
+      guardrails.check_dispatch(
+          Session(verified_customer_id="CUST-1001", escalated=True),
+          "initiate_return").rule == "dispatch.already_escalated")
 check("an unknown tool is treated as the strictest tier",
       guardrails.tier_of("drop_everything") == 2)
 
