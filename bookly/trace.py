@@ -49,6 +49,11 @@ class TurnTrace:
     timestamp: str
     customer_message: str
     model_stops: int = 0                       # how many round trips the loop took
+    # Cost and latency, measured rather than estimated. The value case on the
+    # deck is built from these, so they belong in the record.
+    input_tokens: int = 0
+    output_tokens: int = 0
+    seconds: float = 0.0
     tool_events: list = field(default_factory=list)
     guardrails_fired: list = field(default_factory=list)
     cited_passages: list = field(default_factory=list)
@@ -134,6 +139,9 @@ class Tracer:
             "conversation_id": self.conversation_id,
             "turns": len(self.turns),
             "tool_calls": sum(len(t.tool_events) for t in self.turns),
+            "input_tokens": sum(t.input_tokens for t in self.turns),
+            "output_tokens": sum(t.output_tokens for t in self.turns),
+            "seconds": round(sum(t.seconds for t in self.turns), 1),
             "guardrails_fired": [r for t in self.turns for r in t.guardrails_fired],
             "constraints_surfaced": sorted({c for t in self.turns for c in t.constraints_surfaced}),
             # How did the rule hold?

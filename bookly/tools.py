@@ -84,9 +84,10 @@ TOOL_SCHEMAS = [
     {
         "name": "initiate_return",
         "description": (
-            "Start a return for one item on a delivered order. This moves money, so it is "
-            "subject to eligibility and value checks that may refuse the request. Collect "
-            "the reason for return from the customer before calling this."
+            "Start a return for one item on a delivered order. This moves money, so "
+            "eligibility and value checks may refuse it. Collect the reason for the "
+            "return from the customer before calling this. A refusal on value means a "
+            "colleague must approve, not that the return is impossible."
         ),
         "input_schema": {
             "type": "object",
@@ -302,7 +303,9 @@ def get_order(session: Session, order_id: str = "", **_):
         )
 
     returnable = guardrails.check_returnable(order)
-    value = guardrails.check_refund_value(order)
+    # No item chosen yet, so this checks the order total. Conservative on
+    # purpose: it flags a possible approval step before the customer picks.
+    value = guardrails.check_refund_value(order, session=session)
 
     return (
         {
@@ -376,32 +379,38 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
     if order is None:
         return ({"ok": False, "reason": f"No order found with reference {order_id}."}, None, [])
 
-    decision = guardrails.authorise_return(session, order)
-
-    if not decision.permitted:
-        payload = _refusal(decision)
-        # For the value ceiling specifically, tell the model that a human CAN do
-        # this, otherwise it implies the customer is out of options.
-        if decision.rule == "refund.above_auto_cap":
-            payload["next_step"] = "escalate_to_human"
-            payload["customer_facing_note"] = (
-                "This order needs a colleague to approve because of its value. "
-                "It can still be returned."
-            )
-        return payload, decision.as_dict(), []
-
+    # Resolve the item BEFORE authorising, so the value check sees the money
+    # actually leaving rather than the whole order total.
     item = next((i for i in order["items"] if i["item_id"] == item_id), None)
     if item is None:
         return (
             {"ok": False, "reason": f"Item {item_id} is not on order {order_id}."},
-            decision.as_dict(),
+            None,
             [],
         )
 
+    decision = guardrails.authorise_return(session, order, amount=item["price"])
+
+    if not decision.permitted:
+        payload = _refusal(decision)
+        # Both value rules mean "not by me", not "never". Without this the model
+        # reads refused and tells the customer no, which is wrong and loses them.
+        if decision.rule in ("refund.above_auto_cap", "refund.above_session_cap"):
+            payload["next_step"] = "escalate_to_human"
+            payload["customer_facing_note"] = (
+                "This refund needs a colleague to approve it because of the "
+                "amount. It can still go ahead."
+            )
+        return payload, decision.as_dict(), []
+
     # Mutate the mock store so the duplicate-return guard is real on a second attempt.
     order["return_status"] = "in_progress"
+    # Only count money that actually moved. Written here, read by
+    # check_refund_value on the next attempt in this conversation.
+    session.refunded_so_far += item["price"]
     session.actions_taken.append(
-        {"action": "initiate_return", "order_id": order_id, "item_id": item_id, "reason": reason}
+        {"action": "initiate_return", "order_id": order_id, "item_id": item_id,
+         "reason": reason, "amount": item["price"]}
     )
 
     return (

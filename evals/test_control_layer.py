@@ -125,6 +125,66 @@ open_orders = [o for o in payload["orders"] if o["status"] != "cancelled"]
 check("test customer genuinely has multiple orders, so 'my order' is ambiguous",
       len(open_orders) >= 2, f"{len(open_orders)} orders")
 
+print("\nRefund caps: the amount, not the order total")
+data.reset_state()  # earlier blocks completed a return on ORD-84201
+s8 = Session()
+tools.verify_customer(s8, email="priya.raman@example.com", postcode="SW1A 1AA")
+# ORD-84201 totals 24.98 across two items. Refunding one is well inside the cap.
+payload, _, _ = tools.initiate_return(s8, order_id="ORD-84201", item_id="ITM-1",
+                                      reason="already owned")
+check("small refund from a small order succeeds", payload.get("ok") is True, payload)
+check("the amount recorded is the ITEM price, not the order total",
+      payload.get("refund_amount") == 9.99, payload.get("refund_amount"))
+check("session total tracks the refund", s8.refunded_so_far == 9.99, s8.refunded_so_far)
+
+# The old bug: cap applied to order total over-blocked a small item refund.
+big_order = {"order_id": "T", "customer_id": "C", "status": "delivered",
+             "delivered_date": data._days_ago(3), "currency": "GBP",
+             "total": 120.00, "return_status": None,
+             "items": [{"item_id": "ITM-1", "title": "x", "qty": 1, "price": 20.00}]}
+d = guardrails.check_refund_value(big_order, amount=20.00)
+check("GBP 20 refund from a GBP 120 order is allowed", d.permitted is True, d.reason)
+d = guardrails.check_refund_value(big_order)
+check("with no amount given it falls back to the total and blocks",
+      d.permitted is False, "conservative default")
+
+print("\nRefund caps: per conversation")
+s9 = Session()
+s9.verified_customer_id = "CUST-1001"
+s9.refunded_so_far = 0.0
+small = {"order_id": "T", "customer_id": "CUST-1001", "status": "delivered",
+         "delivered_date": data._days_ago(3), "currency": "GBP", "total": 75.00,
+         "return_status": None,
+         "items": [{"item_id": "ITM-1", "title": "x", "qty": 1, "price": 75.00}]}
+d = guardrails.check_refund_value(small, amount=75.00, session=s9)
+check("first GBP 75 refund allowed", d.permitted is True)
+s9.refunded_so_far = 75.00
+d = guardrails.check_refund_value(small, amount=75.00, session=s9)
+check("second GBP 75 allowed, total 150 is at the limit", d.permitted is True, d.reason)
+s9.refunded_so_far = 150.00
+d = guardrails.check_refund_value(small, amount=75.00, session=s9)
+check("third GBP 75 blocked, would take the session to 225",
+      d.permitted is False and d.rule == "refund.above_session_cap", d.reason)
+check("the split-refund hole is closed",
+      guardrails.AUTO_REFUND_SESSION_CAP_GBP < 4 * 75.00)
+
+print("\nOwnership refusal does not confirm the order exists")
+d = guardrails.check_ownership(Session(verified_customer_id="CUST-1001"),
+                              {"customer_id": "CUST-1002"})
+check("reason says no order found on this account",
+      "no order found" in d.reason.lower() and "this account" in d.reason.lower(), d.reason)
+check("reason never says 'not yours' or 'does not belong'",
+      "belong" not in d.reason.lower() and "yours" not in d.reason.lower(), d.reason)
+s10 = Session()
+tools.verify_customer(s10, email="priya.raman@example.com", postcode="SW1A 1AA")
+payload, dec, _ = tools.get_order(s10, order_id="ORD-84420")
+check("get_order and check_ownership now tell the same story",
+      "no order found" in payload["reason"].lower()
+      and "no order found" in dec["reason"].lower()
+      and "this account" in payload["reason"].lower()
+      and "this account" in dec["reason"].lower(),
+      f"tool={payload['reason']!r} guard={dec['reason']!r}")
+
 print("\nTiered authority")
 check("refunds are tier 2", guardrails.tier_of("initiate_return") == 2)
 check("recommendations are tier 0", guardrails.tier_of("recommend_books") == 0)

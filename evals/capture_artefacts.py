@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """
+Not part of the agent. Tooling I wrote to keep the submission honest: it checks
+the repository and the deck against the committed results.
+
 Produce the artefacts a reviewer needs, and check the deck agrees with them.
 
     python evals/capture_artefacts.py

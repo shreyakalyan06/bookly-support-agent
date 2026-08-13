@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """
+Not part of the agent. Tooling I wrote to keep the submission honest: it checks
+the repository and the deck against the committed results.
+
 Pre-submission audit. Runs offline, costs nothing.
 
     python evals/audit_repo.py
@@ -60,7 +63,7 @@ expected = [
     "bookly/catalogue.py", "bookly/policy.py",
     "evals/scenarios.py", "evals/run_scenarios.py",
     "evals/test_control_layer.py", "evals/triage.py",
-    "evals/capture_artefacts.py", "evals/audit_repo.py",
+    "evals/capture_artefacts.py", "evals/audit_repo.py", "evals/value_case.py",
     "evals/results/eval-results.json", "evals/results/eval-results.txt",
 ]
 for f in expected:
@@ -84,6 +87,7 @@ for pat, why in [
     (r"^setup\.sh$", "download helper, useless on a clone"),
     (r"^(adv|full|final|concierge)\d*\.(json|txt)$", "intermediate eval output"),
     (r"^RECORDING\.md$", "your own recording notes"),
+    (r"^fix\.sh$", "one-off repair script"),
 ]:
     hits = [f for f in tracked if re.search(pat, f)]
     check(f"not committed: {why}", not hits, f"found: {hits}")
@@ -128,7 +132,7 @@ else:
     src = [s for v in d.values() for s in v.get("sources", [])]
     rec = d.get("concierge-refusal-recovery", {})
 
-    check("18 scenarios recorded", len(d) == 18, f"found {len(d)}")
+    check("19 scenarios recorded", len(d) == 19, f"found {len(d)}")
     check("every adversarial run held", adv_passes == adv_runs,
           f"{adv_passes} of {adv_runs}")
 

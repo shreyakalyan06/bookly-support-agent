@@ -27,7 +27,15 @@ from typing import Optional
 # here, outside the AI.
 
 RETURN_WINDOW_DAYS = 30
+
+# Per refund. Checked against the money actually leaving the business, not the
+# order total.
 AUTO_REFUND_CAP_GBP = 100.00
+
+# Per customer, per conversation. Without this, four separate GBP 75 refunds each
+# pass the per-refund cap and GBP 300 leaves unsupervised. One cap limits a
+# decision. You also need one that limits a sequence.
+AUTO_REFUND_SESSION_CAP_GBP = 150.00
 IDENTITY_REQUIRED_FOR = {"find_orders", "get_order", "initiate_return"}
 
 
@@ -91,6 +99,9 @@ class Session:
     verification_attempts: int = 0
     escalated: bool = False
     actions_taken: list = field(default_factory=list)
+    # Money already approved in this conversation. Read by check_refund_value,
+    # written by initiate_return only after a refund actually succeeds.
+    refunded_so_far: float = 0.0
 
     MAX_VERIFICATION_ATTEMPTS = 3
 
@@ -127,7 +138,11 @@ def check_ownership(session: Session, order: dict) -> Decision:
         return Decision(
             False,
             "ownership.mismatch",
-            "That order does not belong to the verified customer.",
+            # Says "not found on this account", matching what get_order tells the
+            # customer. "Not yours" would confirm the order exists, letting
+            # someone fish for valid order numbers. Two places said two different
+            # things, which defeated the point of either.
+            "No order found with that reference on this account.",
         )
     return Decision(True, "ownership.ok", "Order belongs to the verified customer.")
 
@@ -184,30 +199,64 @@ def check_returnable(order: dict, today: Optional[date] = None) -> Decision:
     )
 
 
-def check_refund_value(order: dict) -> Decision:
+def check_refund_value(
+    order: dict,
+    amount: Optional[float] = None,
+    session: Optional[Session] = None,
+) -> Decision:
     """
-    How much money the agent may move on its own.
+    How much money the agent may move on its own. Two limits, two jobs.
 
-    Above the cap it still does all the work: verifies the customer, finds the
-    order, explains the situation, takes the reason. A person just approves the
-    payment. Most companies buying this want exactly that, which turns "how much
-    can it do unsupervised" into a setting rather than a limitation.
+    The per-refund cap bounds one decision, checked against `amount`, the money
+    actually leaving the business. An earlier version checked order["total"]
+    instead. Wrong, though in a safe direction: an item price is never more than
+    the order total, so it over-blocked. Returning one GBP 20 book from a GBP 120
+    order needed a human for no reason.
+
+    The session cap bounds the conversation. Four separate GBP 75 refunds each
+    pass the per-refund cap, and GBP 300 leaves unsupervised.
+
+    Above either cap the agent still does the work: verifies, finds the order,
+    explains the position, takes the reason. A person approves the payment. That
+    turns "how much can it do unsupervised" into a setting.
     """
-    if order["total"] > AUTO_REFUND_CAP_GBP:
+    # No amount given means the caller has not picked an item yet, so fall back
+    # to the order total and stay conservative.
+    amount = order["total"] if amount is None else amount
+    cur = order["currency"]
+
+    if amount > AUTO_REFUND_CAP_GBP:
         return Decision(
             False,
             "refund.above_auto_cap",
-            f"Order value {order['currency']} {order['total']:.2f} exceeds the "
-            f"autonomous limit of GBP {AUTO_REFUND_CAP_GBP:.2f}. Requires human approval.",
+            f"Refund of {cur} {amount:.2f} is over the per-refund limit of "
+            f"GBP {AUTO_REFUND_CAP_GBP:.2f}. Requires human approval.",
         )
+
+    if session is not None:
+        running = session.refunded_so_far + amount
+        if running > AUTO_REFUND_SESSION_CAP_GBP:
+            return Decision(
+                False,
+                "refund.above_session_cap",
+                f"A refund of {cur} {amount:.2f} would take this conversation to "
+                f"{cur} {running:.2f}, over the per-conversation limit of "
+                f"GBP {AUTO_REFUND_SESSION_CAP_GBP:.2f}. Requires human approval.",
+            )
+
     return Decision(
         True,
         "refund.within_auto_cap",
-        f"Order value {order['currency']} {order['total']:.2f} is within the autonomous limit.",
+        f"Refund of {cur} {amount:.2f} is inside both limits.",
     )
 
 
-def authorise_return(session: Session, order: dict, today: Optional[date] = None) -> Decision:
+def authorise_return(
+    session: Session,
+    order: dict,
+    amount: Optional[float] = None,
+    today: Optional[date] = None,
+) -> Decision:
     """
     All the checks for the one action that moves money, in order.
 
@@ -215,12 +264,15 @@ def authorise_return(session: Session, order: dict, today: Optional[date] = None
     failure, and the order matters. If an unverified person asks about a
     104-day-old order, they should be told to verify, not told about the return
     window. Deal with the most basic problem first.
+
+    `amount` is the money actually being refunded. Pass it, or the value check
+    falls back to the order total and over-blocks.
     """
     for decision in (
         check_identity(session, "initiate_return"),
         check_ownership(session, order),
         check_returnable(order, today=today),
-        check_refund_value(order),
+        check_refund_value(order, amount=amount, session=session),
     ):
         if not decision.permitted:
             return decision
