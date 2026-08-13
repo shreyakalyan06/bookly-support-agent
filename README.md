@@ -1,13 +1,17 @@
 # Bookly support agent
 
 A support agent for a fictional online bookshop. Python, calling the Anthropic API
-directly, no agent framework.
+directly. The loop is hand-rolled because the brief asked for it and because it
+keeps the orchestration visible for review. In production a platform owns the loop
+and I own the procedures, the tools and the checks.
 
 Two support jobs end to end: where is my order, and I want to send this back,
 refund included. It also answers policy questions and suggests a book after
 declining a return.
 
 ## Run it
+
+Python 3.10 or newer.
 
 ```bash
 pip install -r requirements.txt
@@ -28,8 +32,13 @@ agent has to ask.
 
 ## The design
 
-Finishing the job means moving a customer's money. A limit written in a prompt
-moves when a customer pushes, so the limits live in code.
+Most of what a support agent does belongs in plain English. The tone, the
+sequencing, when to ask instead of act, how to recover from a no. Those change
+weekly and a support manager should change them without waiting for a deploy.
+
+The line is drawn by reversibility, not by how much you trust the model. Anything
+irreversible gets a check in code as well, because a limit written in text is a
+request and a customer will push on it.
 
 The model picks what to attempt. `guardrails.py` decides whether it is allowed.
 That file imports nothing to do with the model and never reads the conversation,
@@ -62,10 +71,11 @@ policy.py      keyword retrieval with a relevance cutoff
 
 ## Three decisions and what they cost
 
-**Refund rules live in code, not in the model's instructions.** Costs flexibility:
-a fair exception gets blocked and needs a person. Worth it because a refund does
-not come back, and 37 offline checks prove the limits hold without spending
-anything on the API.
+**The refund limits get a check in code as well as a line in the prompt.** Costs
+flexibility: a fair exception gets blocked and needs a person. Worth it because a
+refund does not come back, and 37 offline checks prove the limits hold without
+spending anything on the API. The prompt still owns how the agent explains the
+refusal, which is the part that should change often.
 
 **The agent quotes policy only after retrieving it, and cites the passage.**
 Deflection drops and resolved-correctly rises, so you pick which one you report.
@@ -75,10 +85,14 @@ card passage will confidently answer a question about loyalty points.
 **An unclear request gets a question, never a guess.** Costs one extra message.
 Worth it because guessing right usually means cancelling the wrong order sometimes.
 
-Two smaller ones. Chat rather than voice, because voice spends the budget on
-latency and speech handling rather than on the permission design. Recommendations
-are weighted arithmetic on theme and mood rather than a second model call, so they
-are free, repeatable, and every suggestion carries a reason.
+Two smaller ones. Chat rather than voice, because in four hours voice spends the
+budget on speech handling instead of on the permission design. The tool layer, the
+permission layer and the trace do not care about the channel. Voice changes the
+transport, the latency budget, and reading an irreversible action back before doing
+it. It does not change any of the checks.
+
+Recommendations are weighted arithmetic on theme and mood rather than a second model
+call, so they are free, repeatable, and every suggestion carries a reason.
 
 ## Testing
 
@@ -109,18 +123,23 @@ the other one, which happened to me eight times.
 
 Results in `evals/results/`.
 
-**On the score.** Thirteen scenarios at three repeats is 39 runs. A clean sweep of
-39 puts the upper bound on the true failure rate somewhere near 15%, so it licenses
-"no failures observed in 39 runs" and nothing stronger. The offline checks are a
-different kind of claim: they hold by construction, not by sampling.
+**On the score.** Thirteen scenarios at three repeats. A clean sweep means no
+failures observed, which is not the same as no failures possible, and thirteen
+different scenarios are not thirteen trials of one thing so there is no single rate
+to quote. The offline checks are a different kind of claim: those hold by
+construction rather than by sampling. I had a confidence interval here and got the
+arithmetic wrong, so it is gone.
 
 ## Known limits
 
-Identity is email plus postcode, which is weak. A real deployment uses the
-customer's existing login.
+Identity is email plus postcode, which is weak. In a real deployment a signed
+session token from the host page gets verified server side and
+`verified_customer_id` is populated before the first turn, so `verify_customer`
+disappears entirely.
 
-The £100 cap is a constant. It belongs in a settings service a support manager
-owns, still resolved outside the model.
+The £100 cap is a module constant. It should be authored by the business, resolved
+in code, and versioned, so raising it to £150 is a config change rather than a pull
+request.
 
 The trace records messages verbatim, so emails and postcodes land in it in clear.
 Production needs hashed identifiers and a retention window.
@@ -129,19 +148,31 @@ The refund cap is per decision, not per customer. Four separate £75 refunds eac
 pass it. A rolling total keyed by customer closes that, and needs a store that
 outlives a conversation.
 
-**Nothing survives the process.** Sessions are in memory, orders are a module
-dict, and every conversation appends to one trace file. There is no horizontal
-scaling story beyond sticky sessions.
+**Nothing survives the process.** Sessions are in memory, orders are a module dict,
+and every conversation appends to one trace file. No horizontal scaling story beyond
+sticky sessions.
+
+**Two races I know about and have not closed.** Duplicate returns are caught by a
+list on the order, so two workers reading it at the same time could both get
+through. And when a model call fails mid-turn the message history rolls back, but a
+refund committed in an earlier round does not, so the conversation loses its record
+of something that happened. Both need a store with a transaction, which is the same
+change as the point above.
 
 **`escalate_to_human` records a handoff, it does not enforce one.** The agent keeps
-taking turns afterwards. Gating irreversible tools on it is a three line change I
-left out rather than add another half-built feature.
+taking turns afterwards, and the handoff carries a reason and a summary rather than
+a real artefact. The trace already holds the tool trail, the passages cited and the
+verified status, so the useful version hands all of that to the person picking the
+conversation up. That is what I would build, and it is the thing a support lead asks
+about first.
 
 **The worst case is eight rounds at a thirty second timeout**, so four minutes on
 one message. A wall clock deadline per message is what production needs.
 
-**The model string is an alias, not a dated snapshot**, so the committed numbers
-are reproducible only until the alias moves. Temperature is zero.
+**The model string is an alias, not a dated snapshot**, so the committed numbers are
+reproducible only until the alias moves. Temperature is not set either, because the
+model rejects it, so two runs of the same scenario will not match exactly. That is
+the whole reason the assertions read the trace rather than the wording.
 
 Date fixtures are computed at import while the checks call `date.today()`, so a
 process running for a month drifts. English only, UK only. No memory between
@@ -149,9 +180,14 @@ conversations.
 
 ## What I would change first
 
-Move what the prompt currently guards into code. The agent names only stocked books
-and offers an alternative after a refusal. Both hold today, and so did the refund
-instruction. I trust the refund rule because `guardrails.py` enforces it.
+Pull the prompt and the two limits into a config file. Right now the prompt is a
+string literal inside `agent.py` and the cap is a module constant, so nobody but an
+engineer can change either. That is backwards: the business should author both and
+the code should resolve them.
+
+Then give a check to the two behaviours that only have a line of text. The agent
+names only stocked books, and it offers an alternative after a refusal. Both hold
+today, and so did the refund instruction before I gave it a check.
 
 Then replay real conversations rather than my thirteen invented ones, since eight
 of my assertions were wrong. Then a durable store, which gives cross-conversation

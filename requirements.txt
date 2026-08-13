@@ -1,1 +1,4 @@
-anthropic>=0.40.0
+# Pin this to whatever `pip freeze | grep anthropic` gives you before you commit.
+# The numbers in evals/results were produced against one version and one model
+# alias, and neither is reproducible once either moves.
+anthropic>=0.40.0,<1.0
