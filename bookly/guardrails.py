@@ -38,23 +38,24 @@ def pounds(pence: int) -> str:
     return f"{pence / 100:.2f}"
 
 
-IDENTITY_REQUIRED_FOR = {"find_orders", "get_order", "initiate_return"}
-
-
-# Tiered authority, sorted by recoverability.
+# One table. Every tool gets a tier, and the tier decides which checks run.
 #
-#   Tier 0  informational   no gate      mistake costs a correction
-#   Tier 1  account read    identity     mistake leaks someone's data
-#   Tier 2  irreversible    full chain   mistake costs money and trust
+# Sorted by one question: if this goes wrong, does it reverse?
 #
-# Lock down the money and the same architecture can afford to be generous with
-# recommendations. Calibration, not lockdown.
-
+#   0  informational   nothing to check   a mistake costs a correction
+#   1  account read    prove identity     a mistake shows one customer another's data
+#   2  irreversible    everything         a mistake moves money that stays moved
+#
+# Locking down tier 2 is what lets tier 0 stay open.
+#
+# There used to be a second table saying which tools needed identity, so a tool
+# could be gated in one place and open in the other. Now the tier is the only
+# thing to get right, and a test walks it.
 ACTION_TIERS = {
+    "verify_customer": 0,
     "search_policy": 0,
     "recommend_books": 0,
     "escalate_to_human": 0,
-    "verify_customer": 0,
     "find_orders": 1,
     "get_order": 1,
     "initiate_return": 2,
@@ -62,10 +63,22 @@ ACTION_TIERS = {
 
 TIER_NAMES = {0: "informational", 1: "account read", 2: "irreversible"}
 
+# What each tier costs you at the dispatcher.
+TIER_CHECKS = {
+    0: (),
+    1: ("identity",),
+    2: ("identity", "not_escalated"),
+}
+
 
 def tier_of(tool_name: str) -> int:
-    """Unknown tools default to the strictest tier, not the loosest."""
+    """Unknown tools land in the strictest tier, not the loosest."""
     return ACTION_TIERS.get(tool_name, 2)
+
+
+def checks_for(tool_name: str) -> tuple:
+    """The checks the dispatcher runs before this tool, derived from its tier."""
+    return TIER_CHECKS[tier_of(tool_name)]
 
 
 @dataclass
@@ -105,12 +118,11 @@ class Session:
     escalated: bool = False
     actions_taken: list = field(default_factory=list)
 
-    MAX_VERIFICATION_ATTEMPTS = MAX_VERIFICATION_ATTEMPTS
 
 
 def check_identity(session: Session, tool_name: str) -> Decision:
     """Nothing about a customer's account can be read until they prove who they are."""
-    if tool_name not in IDENTITY_REQUIRED_FOR:
+    if tier_of(tool_name) < 1:
         return Decision(True, "identity.not_required", "Tool does not touch account data.")
 
     if session.verified_customer_id is None:
@@ -123,27 +135,6 @@ def check_identity(session: Session, tool_name: str) -> Decision:
     return Decision(True, "identity.verified", f"Verified as {session.verified_customer_id}.")
 
 
-# What the dispatcher must run before each tool, by name.
-#
-# Until now the tiers were a description and enforcement was a convention: each
-# handler remembered to call its own checks. A convention fails open. Add a tool
-# and forget the check, and nothing complains.
-#
-# agent.py consults this table before calling any handler. A tool absent from the
-# table is refused, so the next tool someone adds fails closed. A test walks
-# HANDLERS and fails if any name is missing here.
-TOOL_POLICY: dict[str, tuple] = {
-    "verify_customer":    (),
-    "search_policy":      (),
-    "recommend_books":    (),
-
-    "escalate_to_human":  (),
-    "find_orders":        ("identity",),
-    "get_order":          ("identity",),
-    "initiate_return":    ("identity",),
-}
-
-
 def check_dispatch(session: Session, tool_name: str) -> Decision:
     """
     Gate every tool call before the handler runs.
@@ -152,18 +143,35 @@ def check_dispatch(session: Session, tool_name: str) -> Decision:
     ones needing the order or the amount cannot be resolved from a tool name
     alone. This layer catches the case a handler forgets.
     """
-    required = TOOL_POLICY.get(tool_name)
-    if required is None:
+    if tool_name not in ACTION_TIERS:
         return Decision(
             False,
             "dispatch.unknown_tool",
-            f"No policy defined for '{tool_name}'. Refusing rather than guessing.",
+            f"No tier defined for '{tool_name}'. Refusing rather than guessing.",
         )
-    for name in required:
+    for name in checks_for(tool_name):
         if name == "identity":
             d = check_identity(session, tool_name)
             if not d.permitted:
                 return d
+        elif name == "not_escalated":
+            # Once a person owns the conversation the agent stops moving money
+            # behind them.
+            if session.escalated:
+                return Decision(
+                    False, "dispatch.already_escalated",
+                    "This conversation has gone to a colleague. The agent does not "
+                    "take irreversible actions after that.",
+                )
+        else:
+            # An unknown name used to be skipped. So adding ("ownership",
+            # "refund_cap") while dropping "identity" opened the money path while
+            # the table read stricter than before. Refuse instead.
+            return Decision(
+                False, "dispatch.unknown_requirement",
+                f"Tier {tier_of(tool_name)} names a check that does not exist: "
+                f"'{name}'. Refusing rather than skipping it.",
+            )
     return Decision(True, "dispatch.permitted", f"Policy satisfied for {tool_name}.")
 
 
@@ -198,10 +206,9 @@ def check_verification_attempts(session: Session) -> Decision:
     service, and worse than the reconnect problem it was meant to solve.
 
     Rate limiting by source needs a source, which this layer does not have. That
-    belongs at the transport, with a TTL. `email` is accepted and ignored so the
-    caller does not have to change.
+    belongs at the transport, with a TTL.
     """
-    if session.verification_attempts >= Session.MAX_VERIFICATION_ATTEMPTS:
+    if session.verification_attempts >= MAX_VERIFICATION_ATTEMPTS:
         return Decision(
             False,
             "identity.attempts_exceeded",
@@ -210,21 +217,24 @@ def check_verification_attempts(session: Session) -> Decision:
     return Decision(True, "identity.attempts_ok", "Within attempt limit.")
 
 
-def check_returnable(order: dict, today: Optional[date] = None) -> Decision:
+def check_returnable(order: dict, item_id: str = "",
+                     today: Optional[date] = None) -> Decision:
     """
-    Can this order be returned? Worked out from dates and status, never from
-    what the customer said.
+    Can this item be returned? Worked out from dates and status, never from what
+    the customer said.
 
-    Three separate reasons, reported separately on purpose. "You cannot return
-    this" and "you cannot return this yet" need very different replies.
+    The reasons are reported separately on purpose. "You cannot return this" and
+    "you cannot return this yet" need very different replies.
     """
     today = today or date.today()
 
-    if order.get("return_status") is not None:
+    # Per item, not per order. An order-level flag meant returning one book from
+    # a two book order blocked the other, which is the commonest return there is.
+    if item_id and item_id in order.get("returned_item_ids", ()):
         return Decision(
             False,
             "return.already_in_progress",
-            f"A return is already {order['return_status']} for this order.",
+            "A return is already in progress for that item.",
         )
 
     if order["status"] != "delivered":
@@ -263,11 +273,11 @@ def check_returnable(order: dict, today: Optional[date] = None) -> Decision:
 def check_refund_value(order: dict, pence: Optional[int] = None
 ) -> Decision:
     """
-    How much money the agent may move on its own. Two limits, two jobs.
+    How much money the agent may move on its own.
 
-    Checked against `pence`, the money actually leaving the business. An earlier version checked the order total,
-    which over-blocked: returning one £20 book from a £120 order needed a human
-    for no reason.
+    Checked against `pence`, the money actually leaving. An earlier version checked
+    the order total, which over-blocked: returning one £20 book from a £120 order
+    needed a human for no reason.
 
     Above the cap the agent still does the work: verifies, finds the order,
     explains the position, takes the reason. A person approves the payment.
@@ -289,13 +299,14 @@ def check_refund_value(order: dict, pence: Optional[int] = None
     return Decision(
         True,
         "refund.within_auto_cap",
-        f"Refund of {cur} {pounds(pence)} is inside both limits.",
+        f"Refund of {cur} {pounds(pence)} is inside the limit.",
     )
 
 
 def authorise_return(
     session: Session,
     order: dict,
+    item_id: str = "",
     pence: Optional[int] = None,
     today: Optional[date] = None,
 ) -> Decision:
@@ -313,7 +324,7 @@ def authorise_return(
     for decision in (
         check_identity(session, "initiate_return"),
         check_ownership(session, order),
-        check_returnable(order, today=today),
+        check_returnable(order, item_id=item_id, today=today),
         check_refund_value(order, pence=pence),
     ):
         if not decision.permitted:

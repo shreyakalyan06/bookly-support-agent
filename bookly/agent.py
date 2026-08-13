@@ -23,6 +23,7 @@ with a refusal, what gets logged) stay visible.
 
 import json
 import os
+import sys
 import time
 from typing import Optional
 
@@ -49,10 +50,6 @@ MAX_ITERATIONS = 8
 # was eight minutes on a single message. A retry belongs behind a wall-clock
 # deadline, and that is not in scope here.
 API_TIMEOUT_SECONDS = 30.0
-
-# Zero, so a rerun of the eval suite measures a change in the code rather than
-# a change in the sampling.
-TEMPERATURE = 0.0
 
 
 SYSTEM_PROMPT = """You are the Bookly customer support assistant. Bookly is an online bookstore in the UK.
@@ -183,7 +180,6 @@ class BooklyAgent:
         return self.client.messages.create(
             model=MODEL,
             max_tokens=1024,
-            temperature=TEMPERATURE,
             system=SYSTEM_PROMPT,
             tools=TOOL_SCHEMAS,
             messages=self.messages,
@@ -279,11 +275,19 @@ class BooklyAgent:
         # tool_use block leaves the conversation malformed, and every later call
         # 400s. Rolling back to this on failure keeps the session usable.
         checkpoint = list(self.messages)
+        said = []
 
         for _ in range(MAX_ITERATIONS):
             try:
                 response = self._call_model()
             except Exception as exc:  # noqa: BLE001
+                # Say what broke. A broad except that swallows the reason turns any
+                # bug in here into a polite handoff, and the eval suite then reports
+                # a missing tool call for every scenario with no clue why. That
+                # cost me a full run: I added temperature=0 for reproducibility,
+                # the model rejected it, and every scenario failed identically.
+                print(f"  model call failed: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
                 self.messages = checkpoint
                 final_text = (
                     "Something went wrong on my side. Let me pass you to a "
@@ -326,6 +330,10 @@ class BooklyAgent:
                 turn.output_tokens += getattr(usage, "output_tokens", 0) or 0
 
             text_blocks = [b.text for b in response.content if b.type == "text"]
+            # Keep everything the model says, including text it emits alongside a
+            # tool call. Only the final block used to reach the trace, so any
+            # assertion reading the reply was inspecting a fraction of the output.
+            said.extend(t for t in text_blocks if t.strip())
             tool_uses = [b for b in response.content if b.type == "tool_use"]
 
             self.messages.append({"role": "assistant", "content": response.content})
@@ -364,7 +372,7 @@ class BooklyAgent:
 
         self.tracer.end_turn(
             turn,
-            agent_message=final_text,
+            agent_message="\n".join(said).strip() or final_text,
             resolution=self._classify(turn, final_text),
             identity_verified=self.session.verified_customer_id is not None,
             recovery_offered=recovery,
