@@ -137,7 +137,7 @@ class BooklyAgent:
         support_tools = {"find_orders", "get_order", "search_policy", "initiate_return"}
         used_support = any(e.tool_name in support_tools for e in turn.tool_events)
         if not used_support and any(
-            e.tool_name in {"recommend_books", "find_book_clubs"} and e.outcome == "ok"
+            e.tool_name in {"recommend_books"} and e.outcome == "ok"
             for e in turn.tool_events
         ):
             return "recommended"
@@ -366,7 +366,7 @@ class BooklyAgent:
 
         turn.seconds = round(time.monotonic() - started, 2)
         tools_used = {e.tool_name for e in turn.tool_events if e.outcome == "ok"}
-        recovery = bool(tools_used & {"recommend_books", "find_book_clubs"})
+        recovery = bool(tools_used & {"recommend_books"})
 
         self.tracer.end_turn(
             turn,

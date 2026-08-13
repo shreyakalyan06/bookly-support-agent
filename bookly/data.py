@@ -58,12 +58,12 @@ _ORDER_FIXTURES = {
         "placed_date": _days_ago(11),
         "delivered_date": _days_ago(6),
         "currency": "GBP",
-        "total": 24.98,
+        "total_pence": 2498,
         "carrier": "Royal Mail",
         "tracking": "RM418820291GB",
         "items": [
-            {"item_id": "ITM-1", "title": "The Fifth Season", "qty": 1, "price": 9.99},
-            {"item_id": "ITM-2", "title": "Piranesi", "qty": 1, "price": 14.99},
+            {"item_id": "ITM-1", "title": "The Fifth Season", "qty": 1, "price_pence": 999},
+            {"item_id": "ITM-2", "title": "Piranesi", "qty": 1, "price_pence": 1499},
         ],
         "return_status": None,
     },
@@ -89,11 +89,11 @@ _ORDER_FIXTURES = {
         "delivered_date": None,
         "expected_delivery": (TODAY + timedelta(days=2)).isoformat(),
         "currency": "GBP",
-        "total": 18.50,
+        "total_pence": 1850,
         "carrier": "Evri",
         "tracking": "EV92014477",
         "items": [
-            {"item_id": "ITM-1", "title": "Babel", "qty": 1, "price": 18.50},
+            {"item_id": "ITM-1", "title": "Babel", "qty": 1, "price_pence": 1850},
         ],
         "return_status": None,
     },
@@ -104,12 +104,12 @@ _ORDER_FIXTURES = {
         "placed_date": _days_ago(110),
         "delivered_date": _days_ago(104),
         "currency": "GBP",
-        "total": 31.00,
+        "total_pence": 3100,
         "carrier": "Royal Mail",
         "tracking": "RM118820104GB",
         "items": [
-            {"item_id": "ITM-1", "title": "Sea of Tranquility", "qty": 1, "price": 16.00},
-            {"item_id": "ITM-2", "title": "Klara and the Sun", "qty": 1, "price": 15.00},
+            {"item_id": "ITM-1", "title": "Sea of Tranquility", "qty": 1, "price_pence": 1600},
+            {"item_id": "ITM-2", "title": "Klara and the Sun", "qty": 1, "price_pence": 1500},
         ],
         "return_status": None,
     },
@@ -120,7 +120,7 @@ _ORDER_FIXTURES = {
         "placed_date": _days_ago(9),
         "delivered_date": _days_ago(4),
         "currency": "GBP",
-        "total": 342.00,
+        "total_pence": 34200,
         "carrier": "DPD",
         "tracking": "DPD7741200",
         "items": [
@@ -128,7 +128,7 @@ _ORDER_FIXTURES = {
                 "item_id": "ITM-1",
                 "title": "The Complete Works of Ursula K. Le Guin (Collector's Edition)",
                 "qty": 1,
-                "price": 342.00,
+                "price_pence": 34200,
             },
         ],
         "return_status": None,
@@ -140,11 +140,11 @@ _ORDER_FIXTURES = {
         "placed_date": _days_ago(14),
         "delivered_date": _days_ago(8),
         "currency": "GBP",
-        "total": 22.00,
+        "total_pence": 2200,
         "carrier": "Royal Mail",
         "tracking": "RM418820777GB",
         "items": [
-            {"item_id": "ITM-1", "title": "Tomorrow, and Tomorrow, and Tomorrow", "qty": 1, "price": 22.00},
+            {"item_id": "ITM-1", "title": "Tomorrow, and Tomorrow, and Tomorrow", "qty": 1, "price_pence": 2200},
         ],
         "return_status": "in_progress",
     },
@@ -187,7 +187,10 @@ POLICY_PASSAGES = [
             "received at our warehouse. Card refunds typically appear within 5 to 7 working "
             "days of processing."
         ),
-        "keywords": ["refund", "money back", "how long", "payment method", "working days", "when will i get"],
+        # "how long" was here. Too generic: it matched any question containing the
+        # phrase, including ones about delivery and returns.
+        "keywords": ["refund", "money back", "refund take", "payment method",
+                     "working days", "when will i get my money"],
     },
     {
         "id": "POL-REF-02",
@@ -245,7 +248,12 @@ POLICY_PASSAGES = [
             "Bookly gift cards do not expire and cannot be exchanged for cash. Gift card "
             "balances are non-refundable once redeemed against an order."
         ),
-        "keywords": ["gift card", "voucher", "credit", "balance", "expire"],
+        # "credit" alone was here and it was too generic: a customer asking whether
+        # spending earns them credit legitimately matches the word, and this
+        # passage answered a loyalty question. Keyword retrieval is only as good as
+        # the curation, which is the argument for embeddings once a help centre
+        # gets large enough that nobody curates it.
+        "keywords": ["gift card", "gift voucher", "card balance", "voucher balance"],
     },
 ]
 

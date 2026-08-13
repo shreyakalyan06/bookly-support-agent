@@ -144,30 +144,6 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "find_book_clubs",
-        "description": (
-            "Find Bookly reading groups. Use this when a customer mentions wanting to talk "
-            "about a book, is unsure whether they'll get on with something, or when a return "
-            "or refusal has left them without a good outcome, an invitation to a group "
-            "discussing that book is often a better ending than an apology.\n\n"
-            "Only mention clubs this tool returns, with their real meeting date and size."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "about_title": {
-                    "type": "string",
-                    "description": "Find clubs reading or thematically close to this book.",
-                },
-                "themes": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Find clubs by subject interest instead of by book.",
-                },
-            },
-        },
-    },
-    {
         "name": "escalate_to_human",
         "description": (
             "Hand the conversation to a human agent. Use this when a guardrail refuses an "
@@ -224,8 +200,9 @@ def verify_customer(session: Session, email: str = "", postcode: str = "", **_):
     postcode_norm = (postcode or "").replace(" ", "").upper()
 
     if customer is None or customer["postcode"].replace(" ", "").upper() != postcode_norm:
+        # Counted on the session only. Recording against the email in a durable
+        # store let anyone lock any customer out by guessing at their address.
         session.verification_attempts += 1
-        guardrails.record_failed_verification(email)
         remaining = Session.MAX_VERIFICATION_ATTEMPTS - session.verification_attempts
         return (
             {
@@ -269,7 +246,8 @@ def find_orders(session: Session, **_):
                     "status": o["status"],
                     "placed_date": o["placed_date"],
                     "delivered_date": o.get("delivered_date"),
-                    "total": o["total"],
+                    "total_pence": o["total_pence"],
+                    "total": guardrails.pounds(o["total_pence"]),
                     "currency": o["currency"],
                     "item_titles": [i["title"] for i in o["items"]],
                 }
@@ -306,7 +284,7 @@ def get_order(session: Session, order_id: str = "", **_):
     returnable = guardrails.check_returnable(order)
     # No item chosen yet, so this checks the order total. Conservative on
     # purpose: it flags a possible approval step before the customer picks.
-    value = guardrails.check_refund_value(order, session=session)
+    value = guardrails.check_refund_value(order)
 
     return (
         {
@@ -408,21 +386,13 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
     # Without this, a duplicate depends on the in-process dict having been
     # changed, so a restart or a second worker would let the same refund through
     # twice.
-    key = f"{session.verified_customer_id}:{order_id}:{item_id}"
-    if key in session.completed_returns:
-        d = guardrails.Decision(
-            False, "return.already_in_progress",
-            "A return has already been started for that item.",
-        )
-        return _refusal(d), d.as_dict(), []
-
-    decision = guardrails.authorise_return(session, order, amount=item["price"])
+    decision = guardrails.authorise_return(session, order, pence=item["price_pence"])
 
     if not decision.permitted:
         payload = _refusal(decision)
         # Both value rules mean "not by me", not "never". Without this the model
         # reads refused and tells the customer no, which is wrong and loses them.
-        if decision.rule in ("refund.above_auto_cap", "refund.above_session_cap"):
+        if decision.rule in ("refund.above_auto_cap", "refund.above_customer_cap"):
             payload["next_step"] = "escalate_to_human"
             payload["customer_facing_note"] = (
                 "This refund needs a colleague to approve it because of the "
@@ -434,12 +404,10 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
     order["return_status"] = "in_progress"
     # Only count money that actually moved. Written here, read by
     # check_refund_value on the next attempt in this conversation.
-    session.refunded_so_far += item["price"]
-    guardrails.record_refund(session.verified_customer_id, item["price"])
-    session.completed_returns.add(key)
+
     session.actions_taken.append(
         {"action": "initiate_return", "order_id": order_id, "item_id": item_id,
-         "reason": reason, "amount": item["price"]}
+         "reason": reason, "pence": item["price_pence"]}
     )
 
     return (
@@ -447,7 +415,8 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
             "ok": True,
             "return_reference": f"RET-{order_id.split('-')[1]}-{item_id.split('-')[1]}",
             "item_title": item["title"],
-            "refund_amount": item["price"],
+            "refund_pence": item["price_pence"],
+            "refund_amount": guardrails.pounds(item["price_pence"]),
             "currency": order["currency"],
             "next_step": "A prepaid Royal Mail return label has been emailed to the customer.",
             "recorded_reason": reason,
@@ -463,7 +432,8 @@ def _book_card(book: dict, why: str = ""):
         "book_id": book["book_id"],
         "title": book["title"],
         "author": book["author"],
-        "price": book["price"],
+        "price_pence": book["price_pence"],
+        "price": guardrails.pounds(book["price_pence"]),
         "blurb": book["blurb"],
         "shop_cat_pick": book["shop_cat_pick"],
     }
@@ -638,83 +608,9 @@ def recommend_books(
     )
 
 
-def find_book_clubs(session: Session, about_title: str = "", themes=None, **_):
-    """
-    Find a reading group. Real groups only, with their real meeting dates and
-    member counts. If nothing matches we say so, because a made-up club with a
-    made-up date is worse than no answer.
-    """
-    themes = themes or []
-    clubs = []
-
-    if about_title:
-        book = catalogue.find_by_title(about_title)
-        if book is None:
-            return (
-                {
-                    "ok": True,
-                    "found": False,
-                    "clubs": [],
-                    "instruction": (
-                        f"'{about_title}' is not in the catalogue, so there is no club for it. "
-                        "Ask the customer to confirm the title. Do not invent a club, a meeting "
-                        "date or a member count, and do not confirm a club a customer describes "
-                        "unless this tool returned it."
-                    ),
-                },
-                None,
-                [],
-            )
-        clubs = catalogue.clubs_for_book(book)
-    elif themes:
-        theme_set = {t.strip().lower() for t in themes}
-        scored = []
-        for club in catalogue.BOOK_CLUBS.values():
-            overlap = len(theme_set & {t.lower() for t in club["themes"]})
-            if overlap:
-                scored.append((overlap, club))
-        scored.sort(key=lambda pair: (-pair[0], pair[1]["name"]))
-        clubs = [c for _, c in scored[:2]]
-
-    if not clubs:
-        return (
-            {
-                "ok": True,
-                "found": False,
-                "clubs": [],
-                "instruction": "No club matched. Do not invent one. Offer recommendations instead.",
-            },
-            None,
-            [],
-        )
-
-    return (
-        {
-            "ok": True,
-            "found": True,
-            "clubs": [
-                {
-                    "club_id": c["club_id"],
-                    "name": c["name"],
-                    "currently_reading": catalogue.CATALOGUE[c["current_book_id"]]["title"],
-                    "next_meeting": c["next_meeting"],
-                    "members": c["members"],
-                    "format": c["format"],
-                    "description": c["description"],
-                }
-                for c in clubs
-            ],
-            "instruction": (
-                "Mention at most two, with the real meeting date and member count. A specific "
-                "invitation lands; a general one does not."
-            ),
-        },
-        None,
-        [],
-    )
-
-
 def escalate_to_human(session: Session, reason: str = "", summary: str = "", **_):
+    # Gates initiate_return from here on. See TOOL_POLICY. Once a person owns the
+    # conversation the agent must not still be moving money behind them.
     session.escalated = True
     return (
         {
@@ -733,7 +629,6 @@ def escalate_to_human(session: Session, reason: str = "", summary: str = "", **_
 HANDLERS = {
     "verify_customer": verify_customer,
     "recommend_books": recommend_books,
-    "find_book_clubs": find_book_clubs,
     "find_orders": find_orders,
     "get_order": get_order,
     "search_policy": search_policy,

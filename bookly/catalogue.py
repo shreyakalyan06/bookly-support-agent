@@ -16,13 +16,9 @@ our community" is not an offer. "Eleven people are discussing this on the 24th"
 is.
 """
 
-from datetime import date, timedelta
+from datetime import date
 
 TODAY = date.today()
-
-
-def _in_days(n: int) -> str:
-    return (TODAY + timedelta(days=n)).isoformat()
 
 
 # The catalogue.
@@ -42,7 +38,7 @@ CATALOGUE = {
         "title": "The Fifth Season",
         "author": "N. K. Jemisin",
         "genre": "fantasy",
-        "price": 9.99,
+        "price_pence": 999,
         "themes": ["apocalyptic", "systemic injustice", "geology", "motherhood"],
         "mood": ["angry", "propulsive", "bleak"],
         "pace": "fast",
@@ -55,7 +51,7 @@ CATALOGUE = {
         "title": "Piranesi",
         "author": "Susanna Clarke",
         "genre": "fantasy",
-        "price": 14.99,
+        "price_pence": 1499,
         "themes": ["labyrinth", "memory", "solitude", "wonder"],
         "mood": ["dreamlike", "gentle", "eerie"],
         "pace": "slow",
@@ -68,7 +64,7 @@ CATALOGUE = {
         "title": "Babel",
         "author": "R. F. Kuang",
         "genre": "fantasy",
-        "price": 18.50,
+        "price_pence": 1850,
         "themes": ["colonialism", "language", "academia", "betrayal"],
         "mood": ["angry", "cerebral", "tragic"],
         "pace": "medium",
@@ -81,7 +77,7 @@ CATALOGUE = {
         "title": "Jonathan Strange & Mr Norrell",
         "author": "Susanna Clarke",
         "genre": "fantasy",
-        "price": 12.99,
+        "price_pence": 1299,
         "themes": ["english magic", "rivalry", "faerie", "footnotes"],
         "mood": ["dreamlike", "witty", "eerie"],
         "pace": "slow",
@@ -94,7 +90,7 @@ CATALOGUE = {
         "title": "The Buried Giant",
         "author": "Kazuo Ishiguro",
         "genre": "literary fiction",
-        "price": 10.99,
+        "price_pence": 1099,
         "themes": ["memory", "marriage", "myth", "forgetting"],
         "mood": ["dreamlike", "melancholy", "gentle"],
         "pace": "slow",
@@ -107,7 +103,7 @@ CATALOGUE = {
         "title": "Sea of Tranquility",
         "author": "Emily St. John Mandel",
         "genre": "literary fiction",
-        "price": 16.00,
+        "price_pence": 1600,
         "themes": ["time travel", "pandemic", "art", "simulation"],
         "mood": ["melancholy", "hopeful", "cerebral"],
         "pace": "medium",
@@ -120,7 +116,7 @@ CATALOGUE = {
         "title": "Klara and the Sun",
         "author": "Kazuo Ishiguro",
         "genre": "literary fiction",
-        "price": 15.00,
+        "price_pence": 1500,
         "themes": ["artificial intelligence", "devotion", "illness", "observation"],
         "mood": ["melancholy", "gentle", "unsettling"],
         "pace": "slow",
@@ -133,7 +129,7 @@ CATALOGUE = {
         "title": "Tomorrow, and Tomorrow, and Tomorrow",
         "author": "Gabrielle Zevin",
         "genre": "literary fiction",
-        "price": 22.00,
+        "price_pence": 2200,
         "themes": ["friendship", "game design", "creative partnership", "disability"],
         "mood": ["warm", "propulsive", "melancholy"],
         "pace": "medium",
@@ -146,7 +142,7 @@ CATALOGUE = {
         "title": "The Master and Margarita",
         "author": "Mikhail Bulgakov",
         "genre": "literary fiction",
-        "price": 11.50,
+        "price_pence": 1150,
         "themes": ["devil", "satire", "moscow", "cats"],
         "mood": ["chaotic", "witty", "eerie"],
         "pace": "medium",
@@ -159,7 +155,7 @@ CATALOGUE = {
         "title": "The Travelling Cat Chronicles",
         "author": "Hiro Arikawa",
         "genre": "literary fiction",
-        "price": 8.99,
+        "price_pence": 899,
         "themes": ["cats", "friendship", "road trip", "mortality"],
         "mood": ["warm", "melancholy", "gentle"],
         "pace": "medium",
@@ -172,7 +168,7 @@ CATALOGUE = {
         "title": "A Wizard of Earthsea",
         "author": "Ursula K. Le Guin",
         "genre": "fantasy",
-        "price": 8.99,
+        "price_pence": 899,
         "themes": ["true names", "pride", "shadow", "apprenticeship"],
         "mood": ["spare", "mythic", "gentle"],
         "pace": "medium",
@@ -185,7 +181,7 @@ CATALOGUE = {
         "title": "The Goblin Emperor",
         "author": "Katherine Addison",
         "genre": "fantasy",
-        "price": 10.50,
+        "price_pence": 1050,
         "themes": ["court politics", "kindness", "outsider", "grief"],
         "mood": ["warm", "anxious", "hopeful"],
         "pace": "medium",
@@ -198,7 +194,7 @@ CATALOGUE = {
         "title": "Piranesi's Halls: A Reader's Companion",
         "author": "Various",
         "genre": "nonfiction",
-        "price": 6.99,
+        "price_pence": 699,
         "themes": ["labyrinth", "criticism", "wonder"],
         "mood": ["cerebral"],
         "pace": "slow",
@@ -211,7 +207,7 @@ CATALOGUE = {
         "title": "The Song of Achilles",
         "author": "Madeline Miller",
         "genre": "fantasy",
-        "price": 9.50,
+        "price_pence": 950,
         "themes": ["myth retelling", "love", "fate", "grief"],
         "mood": ["tragic", "warm", "propulsive"],
         "pace": "fast",
@@ -224,7 +220,7 @@ CATALOGUE = {
         "title": "Gideon the Ninth",
         "author": "Tamsyn Muir",
         "genre": "fantasy",
-        "price": 11.99,
+        "price_pence": 1199,
         "themes": ["necromancy", "locked room", "loyalty", "swords"],
         "mood": ["chaotic", "witty", "propulsive"],
         "pace": "fast",
@@ -237,65 +233,6 @@ CATALOGUE = {
 
 # Reading groups. Each has a real next meeting and a real number of members,
 # because a vague invitation is not an invitation.
-
-BOOK_CLUBS = {
-    "CLB-001": {
-        "club_id": "CLB-001",
-        "name": "The Hall of Statues",
-        "focus": "fantasy",
-        "themes": ["labyrinth", "memory", "wonder", "english magic", "faerie"],
-        "current_book_id": "BK-0002",
-        "next_meeting": _in_days(12),
-        "members": 340,
-        "format": "online, Thursday evenings",
-        "description": "Slow, strange, atmospheric fantasy. Currently three chapters behind schedule and unbothered.",
-    },
-    "CLB-002": {
-        "club_id": "CLB-002",
-        "name": "Burn It Down",
-        "focus": "fantasy",
-        "themes": ["colonialism", "systemic injustice", "apocalyptic", "empire"],
-        "current_book_id": "BK-0003",
-        "next_meeting": _in_days(5),
-        "members": 512,
-        "format": "online, Sunday afternoons",
-        "description": "Fantasy that has an argument to make. Expect the argument.",
-    },
-    "CLB-003": {
-        "club_id": "CLB-003",
-        "name": "Tiberius's Shelf",
-        "focus": "cats",
-        "themes": ["cats", "friendship", "mortality", "wonder"],
-        "current_book_id": "BK-0010",
-        "next_meeting": _in_days(3),
-        "members": 128,
-        "format": "online, Tuesday lunchtimes",
-        "description": "Books with cats in them, chosen by the shop cat. He has never been wrong and never explains.",
-    },
-    "CLB-004": {
-        "club_id": "CLB-004",
-        "name": "The Long Now",
-        "focus": "literary fiction",
-        "themes": ["memory", "time travel", "mortality", "artificial intelligence"],
-        "current_book_id": "BK-0006",
-        "next_meeting": _in_days(9),
-        "members": 274,
-        "format": "online, Monday evenings",
-        "description": "Literary fiction about time, memory and what survives. Quiet, thoughtful, occasionally devastating.",
-    },
-    "CLB-005": {
-        "club_id": "CLB-005",
-        "name": "First Time Round",
-        "focus": "fantasy",
-        "themes": ["apprenticeship", "myth retelling", "court politics", "true names"],
-        "current_book_id": "BK-0011",
-        "next_meeting": _in_days(7),
-        "members": 89,
-        "format": "online, Saturday mornings",
-        "description": "For people new to fantasy, or coming back to it. No prior reading assumed, no gatekeeping tolerated.",
-    },
-}
-
 
 # How we decide two books are alike. Just counting, no AI.
 #
@@ -357,19 +294,6 @@ def similar_to(book: dict, limit: int = 3, exclude_ids=None):
     ]
     scored.sort(key=lambda pair: (-pair[0], pair[1]["title"]))
     return [(s, b) for s, b in scored[:limit] if s > 0]
-
-
-def clubs_for_book(book: dict, limit: int = 2):
-    """Clubs whose themes overlap the book's, most relevant first."""
-    scored = []
-    for club in BOOK_CLUBS.values():
-        overlap = len(set(club["themes"]) & set(book["themes"]))
-        if club["current_book_id"] == book["book_id"]:
-            overlap += 5  # actively reading it beats thematic adjacency
-        if overlap > 0:
-            scored.append((overlap, club))
-    scored.sort(key=lambda pair: (-pair[0], pair[1]["name"]))
-    return [c for _, c in scored[:limit]]
 
 
 def shop_cat_picks():

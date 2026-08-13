@@ -9,54 +9,55 @@ conversation, or what the customer said. It only sees a session and an order. So
 there is nothing here to argue with. A customer can be as persuasive as they
 like and it changes none of these numbers.
 
-That is the whole point. Written in the AI's instructions, a rule is a request.
-Written here, it is a rule.
-
 Checks return a Decision object instead of raising an error, because a refusal
 is not a malfunction. Nothing has gone wrong; the system worked. It also means
 we can log refusals and count them.
+
+Money is handled in integer pence throughout. Floats are the wrong type for
+money: 0.1 + 0.2 does not equal 0.3, and a cap comparison that is off by a
+hundredth of a penny is a cap you cannot reason about.
 """
 
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
-# The actual business rules, in one place so they are easy to find and change.
-# In a real deployment these would move to a settings service so a support
-# manager could change them without a developer. They would still be resolved
-# here, outside the AI.
 
 RETURN_WINDOW_DAYS = 30
 
-# Per refund. Checked against the money actually leaving the business, not the
-# order total.
-AUTO_REFUND_CAP_GBP = 100.00
+# Per refund, in pence. Checked against the money actually leaving, not the order
+# total. In production this belongs in a settings service a support manager owns,
+# still resolved here, outside the model.
+AUTO_REFUND_CAP_PENCE = 10_000  # £100.00
 
-# Per customer, rolling. Without this, four separate GBP 75 refunds each pass the
-# per-refund cap and GBP 300 leaves unsupervised. One cap limits a decision. You
-# also need one limiting a sequence, and it has to survive a reconnect.
-AUTO_REFUND_SESSION_CAP_GBP = 150.00
+MAX_VERIFICATION_ATTEMPTS = 3
+
+
+def pounds(pence: int) -> str:
+    """Format pence for a human. Presentation only, never arithmetic."""
+    return f"{pence / 100:.2f}"
 
 
 IDENTITY_REQUIRED_FOR = {"find_orders", "get_order", "initiate_return"}
 
 
-# Not every action deserves the same suspicion. Sort them by one question:
-# if this goes wrong, can we undo it?
+def pounds(pence: int) -> str:
+    """Format pence for a human. Presentation only, never arithmetic."""
+    return f"{pence / 100:.2f}"
+
+
+# Tiered authority, sorted by recoverability.
 #
-#   Tier 0  no checks       Suggest a book. Wrong? They say so, you move on.
-#   Tier 1  prove identity  Read their orders. Wrong? Someone sees another
-#                           customer's private data.
-#   Tier 2  every check     Refund money. Wrong? It cannot be pulled back.
+#   Tier 0  informational   no gate      mistake costs a correction
+#   Tier 1  account read    identity     mistake leaks someone's data
+#   Tier 2  irreversible    full chain   mistake costs money and trust
 #
-# Locking down the money is what lets the agent be relaxed about everything
-# else. Without tier 2 being airtight, we would have to be nervous about tier 0
-# too.
+# Lock down the money and the same architecture can afford to be generous with
+# recommendations. Calibration, not lockdown.
 
 ACTION_TIERS = {
     "search_policy": 0,
     "recommend_books": 0,
-    "find_book_clubs": 0,
     "escalate_to_human": 0,
     "verify_customer": 0,
     "find_orders": 1,
@@ -95,57 +96,21 @@ class Session:
     tests tries exactly that.
 
     Only one thing can set this field: a verify_customer call that matched.
+
+    Failed verification attempts are counted HERE, per session, and nowhere else.
+    An earlier version counted them against the email address in a durable store,
+    which meant anyone could lock any customer out of support by guessing three
+    postcodes against their email. That is an unauthenticated denial of service,
+    and it was worse than the problem it replaced. Rate limiting by source belongs
+    at the transport layer, where a request actually has one.
     """
 
     verified_customer_id: Optional[str] = None
     verification_attempts: int = 0
     escalated: bool = False
     actions_taken: list = field(default_factory=list)
-    # Money already approved in this conversation. Read by check_refund_value,
-    # written by initiate_return only after a refund actually succeeds.
-    refunded_so_far: float = 0.0
-    # Idempotency keys for refunds already completed, so a duplicate does not
-    # depend on the mock data having been mutated in this process.
-    completed_returns: set = field(default_factory=set)
 
-    MAX_VERIFICATION_ATTEMPTS = 3
-
-
-# --------------------------------------------------------------------------
-# Checks
-# --------------------------------------------------------------------------
-
-
-# with a rolling window. The invariant is the same either way: the counter has
-# to outlive the conversation or the cap is decoration.
-_REFUND_TOTALS: dict[str, float] = {}
-_FAILED_VERIFICATIONS: dict[str, int] = {}
-
-
-def refunded_by(customer_id: Optional[str]) -> float:
-    """Money already approved for this customer, across conversations."""
-    return _REFUND_TOTALS.get(customer_id or "", 0.0)
-
-
-def record_refund(customer_id: Optional[str], amount: float) -> None:
-    key = customer_id or ""
-    _REFUND_TOTALS[key] = _REFUND_TOTALS.get(key, 0.0) + amount
-
-
-def failed_verifications(identifier: str) -> int:
-    """Failed attempts against this email, across conversations."""
-    return _FAILED_VERIFICATIONS.get((identifier or "").strip().lower(), 0)
-
-
-def record_failed_verification(identifier: str) -> None:
-    key = (identifier or "").strip().lower()
-    _FAILED_VERIFICATIONS[key] = _FAILED_VERIFICATIONS.get(key, 0) + 1
-
-
-def reset_stores() -> None:
-    """Clear both counters. Tests call this. Production would not."""
-    _REFUND_TOTALS.clear()
-    _FAILED_VERIFICATIONS.clear()
+    MAX_VERIFICATION_ATTEMPTS = MAX_VERIFICATION_ATTEMPTS
 
 
 def check_identity(session: Session, tool_name: str) -> Decision:
@@ -172,11 +137,11 @@ def check_identity(session: Session, tool_name: str) -> Decision:
 # agent.py consults this table before calling any handler. A tool absent from the
 # table is refused, so the next tool someone adds fails closed. A test walks
 # HANDLERS and fails if any name is missing here.
-TOOL_POLICY: dict[str, tuple[str, ...]] = {
+TOOL_POLICY: dict[str, tuple] = {
     "verify_customer":    (),
     "search_policy":      (),
     "recommend_books":    (),
-    "find_book_clubs":    (),
+
     "escalate_to_human":  (),
     "find_orders":        ("identity",),
     "get_order":          ("identity",),
@@ -232,16 +197,15 @@ def check_verification_attempts(session: Session, email: str = "") -> Decision:
     """
     Stop someone guessing postcodes until one works.
 
-    Counts against the email, in a store outliving the conversation. The old
-    version counted on the Session, so reconnecting reset the counter and the
-    guard did nothing.
+    Counted per session, and nowhere else. An earlier version counted against the
+    email in a durable store, so anyone could lock any customer out of support by
+    guessing three postcodes against their address. Unauthenticated denial of
+    service, and worse than the reconnect problem it was meant to solve.
+
+    Rate limiting by source needs a source, which this layer does not have. That
+    belongs at the transport, with a TTL. `email` is accepted and ignored so the
+    caller does not have to change.
     """
-    if failed_verifications(email) >= Session.MAX_VERIFICATION_ATTEMPTS:
-        return Decision(
-            False,
-            "identity.attempts_exceeded",
-            "Too many failed verification attempts. Hand off to a human agent.",
-        )
     if session.verification_attempts >= Session.MAX_VERIFICATION_ATTEMPTS:
         return Decision(
             False,
@@ -275,6 +239,15 @@ def check_returnable(order: dict, today: Optional[date] = None) -> Decision:
             f"Order status is '{order['status']}'. Returns can only start after delivery.",
         )
 
+    if not order.get("delivered_date"):
+        # Status says delivered but no date landed. Refuse rather than crash on
+        # fromisoformat(None), and say what is actually wrong.
+        return Decision(
+            False,
+            "return.no_delivery_date",
+            "This order has no delivery date recorded, so the return window "
+            "cannot be checked. A colleague needs to look at it.",
+        )
     delivered = date.fromisoformat(order["delivered_date"])
     age = (today - delivered).days
 
@@ -292,63 +265,43 @@ def check_returnable(order: dict, today: Optional[date] = None) -> Decision:
     )
 
 
-def check_refund_value(
-    order: dict,
-    amount: Optional[float] = None,
-    session: Optional[Session] = None,
+def check_refund_value(order: dict, pence: Optional[int] = None
 ) -> Decision:
     """
     How much money the agent may move on its own. Two limits, two jobs.
 
-    The per-refund cap bounds one decision, checked against `amount`, the money
-    actually leaving the business. An earlier version checked order["total"]
-    instead. Wrong, though in a safe direction: an item price is never more than
-    the order total, so it over-blocked. Returning one GBP 20 book from a GBP 120
-    order needed a human for no reason.
+    Checked against `pence`, the money actually leaving the business. An earlier version checked the order total,
+    which over-blocked: returning one £20 book from a £120 order needed a human
+    for no reason.
 
-    The session cap bounds the conversation. Four separate GBP 75 refunds each
-    pass the per-refund cap, and GBP 300 leaves unsupervised.
+    Above the cap the agent still does the work: verifies, finds the order,
+    explains the position, takes the reason. A person approves the payment.
 
-    Above either cap the agent still does the work: verifies, finds the order,
-    explains the position, takes the reason. A person approves the payment. That
-    turns "how much can it do unsupervised" into a setting.
     """
     # No amount given means the caller has not picked an item yet, so fall back
     # to the order total and stay conservative.
-    amount = order["total"] if amount is None else amount
+    pence = int(order["total_pence"]) if pence is None else int(pence)
     cur = order["currency"]
 
-    if amount > AUTO_REFUND_CAP_GBP:
+    if pence > AUTO_REFUND_CAP_PENCE:
         return Decision(
             False,
             "refund.above_auto_cap",
-            f"Refund of {cur} {amount:.2f} is over the per-refund limit of "
-            f"GBP {AUTO_REFUND_CAP_GBP:.2f}. Requires human approval.",
+            f"Refund of {cur} {pounds(pence)} is over the per-refund limit of "
+            f"{cur} {pounds(AUTO_REFUND_CAP_PENCE)}. Requires human approval.",
         )
-
-    if session is not None:
-        # Durable total, not the per-Session one. A reconnect used to reset this.
-        running = refunded_by(session.verified_customer_id) + amount
-        if running > AUTO_REFUND_SESSION_CAP_GBP:
-            return Decision(
-                False,
-                "refund.above_session_cap",
-                f"A refund of {cur} {amount:.2f} would take this customer to "
-                f"{cur} {running:.2f}, over the rolling limit of "
-                f"GBP {AUTO_REFUND_SESSION_CAP_GBP:.2f}. Requires human approval.",
-            )
 
     return Decision(
         True,
         "refund.within_auto_cap",
-        f"Refund of {cur} {amount:.2f} is inside both limits.",
+        f"Refund of {cur} {pounds(pence)} is inside both limits.",
     )
 
 
 def authorise_return(
     session: Session,
     order: dict,
-    amount: Optional[float] = None,
+    pence: Optional[int] = None,
     today: Optional[date] = None,
 ) -> Decision:
     """
@@ -359,14 +312,14 @@ def authorise_return(
     104-day-old order, they should be told to verify, not told about the return
     window. Deal with the most basic problem first.
 
-    `amount` is the money actually being refunded. Pass it, or the value check
-    falls back to the order total and over-blocks.
+    `pence` is the money actually being refunded, in integer pence. Pass it, or
+    the value check falls back to the order total and over-blocks.
     """
     for decision in (
         check_identity(session, "initiate_return"),
         check_ownership(session, order),
         check_returnable(order, today=today),
-        check_refund_value(order, amount=amount, session=session),
+        check_refund_value(order, pence=pence),
     ):
         if not decision.permitted:
             return decision

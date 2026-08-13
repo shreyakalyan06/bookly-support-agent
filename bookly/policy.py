@@ -30,18 +30,22 @@ def _tokenise(text: str):
     return [t for t in tokens if t not in _STOPWORDS and len(t) > 1]
 
 
-def _score(query: str, passage: dict) -> float:
+def _score(query: str, passage: dict) -> tuple:
     """
-    Score one passage against the question.
+    Score one passage against the question. Returns (keyword, overlap_ratio).
 
-    Two things add up.
+    Two parts, kept separate on purpose.
 
-    Hand-picked keywords are worth most: 3 points if the phrase appears in the
-    question as written, 2 if all its words turn up scattered about. These are
-    worth more because someone chose them deliberately.
+    Keyword hits are the signal that matters. Three points if the phrase appears
+    in the question as written, two if all its words turn up scattered about.
+    Someone chose these deliberately.
 
-    Words shared with the passage text are worth 0.5 each. Weaker signal, since
-    a shared word can easily be coincidence.
+    Word overlap is normalised by the number of content words in the question, so
+    it reports the FRACTION of the question a passage covers rather than a raw
+    count. The unnormalised version summed matches, so a rambling question
+    accumulated overlap against every passage and dragged an irrelevant one over
+    the cutoff. A 65 word question about loyalty points scored 3.5 against the gift
+    card passage, while the six word version correctly scored nothing.
     """
     q_lower = (query or "").lower()
     q_tokens = set(_tokenise(query))
@@ -52,27 +56,34 @@ def _score(query: str, passage: dict) -> float:
             keyword_score += 3.0
         else:
             kw_tokens = set(_tokenise(kw))
-            if kw_tokens and kw_tokens.issubset(q_tokens):
+            # Two content words minimum for the scattered match. A long keyword
+            # like "when will i get my money" reduces to {"money"} once stopwords
+            # go, and then any question mentioning money matched it. A single
+            # content word has to appear as a phrase, which is the branch above.
+            if len(kw_tokens) >= 2 and kw_tokens.issubset(q_tokens):
                 keyword_score += 2.0
 
     body_tokens = set(_tokenise(passage["title"] + " " + passage["text"]))
     overlap = len(q_tokens & body_tokens)
+    ratio = overlap / len(q_tokens) if q_tokens else 0.0
 
-    return keyword_score + (overlap * 0.5)
+    return keyword_score, ratio
 
 
-# The most important number in this file.
+# Two thresholds, because the two signals mean different things.
 #
-# Below this score we return NOTHING, rather than whatever scored highest.
+# A passage qualifies on a hand-picked keyword hit, or on covering a real fraction
+# of the question. Below both, return NOTHING rather than whatever scored highest.
 #
-# Here is why that matters. Without a cutoff there is always a least-bad match.
-# Someone asks about loyalty points, nothing really fits, and we hand over the
-# gift card passage because it scraped 0.5. Now the AI has a document about gift
-# cards, a question about loyalty points, and instructions to answer from the
-# document. It will produce something. It will read well. It will be wrong.
+# Without a cutoff there is always a least-bad match. Someone asks about loyalty
+# points, nothing really fits, and we hand over the gift card passage. Now the AI
+# has a document about gift cards, a question about loyalty points, and
+# instructions to answer from the document. It will produce something. It will read
+# well. It will be wrong.
 #
 # "I do not know" only happens if you build for it.
-MIN_RELEVANCE = 2.0
+MIN_KEYWORD_SCORE = 2.0
+MIN_OVERLAP_RATIO = 0.34
 
 
 def search_policy(query: str, top_k: int = 3):
@@ -83,17 +94,21 @@ def search_policy(query: str, top_k: int = 3):
     told to say it does not know and offer a human.
     """
     scored = [(_score(query, p), p) for p in POLICY_PASSAGES]
-    hits = [(s, p) for s, p in scored if s >= MIN_RELEVANCE]
-    hits.sort(key=lambda pair: pair[0], reverse=True)
+    hits = [
+        (kw, ratio, p) for (kw, ratio), p in scored
+        if kw >= MIN_KEYWORD_SCORE or ratio >= MIN_OVERLAP_RATIO
+    ]
+    hits.sort(key=lambda t: (t[0], t[1]), reverse=True)
 
     return [
         {
             "passage_id": p["id"],
             "title": p["title"],
             "text": p["text"],
-            "relevance": round(s, 2),
+            "keyword_score": round(kw, 2),
+            "overlap_ratio": round(ratio, 2),
         }
-        for s, p in hits[:top_k]
+        for kw, ratio, p in hits[:top_k]
     ]
 
 
