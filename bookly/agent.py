@@ -293,10 +293,11 @@ class BooklyAgent:
                     "Something went wrong on my side. Let me pass you to a "
                     "colleague."
                 )
-                self._run_tool(
-                    turn, "escalate_to_human",
-                    {"reason": f"model_call_failed: {exc}", "summary": customer_message},
-                )
+                # Recorded, not routed through escalate_to_human. That tool sets
+                # session.escalated, which gates refunds, so a network blip used to
+                # disable the money path for the rest of the conversation. A
+                # technical failure and a deliberate handoff are different things.
+                turn.technical_failure = str(exc)
                 self.tracer.end_turn(
                     turn, agent_message=final_text, resolution="escalated",
                     identity_verified=self.session.verified_customer_id is not None,
@@ -313,10 +314,7 @@ class BooklyAgent:
                     "I got partway through that and lost the thread. Let me hand "
                     "you to a colleague."
                 )
-                self._run_tool(
-                    turn, "escalate_to_human",
-                    {"reason": "response_truncated", "summary": customer_message},
-                )
+                turn.technical_failure = "response_truncated"
                 self.tracer.end_turn(
                     turn, agent_message=final_text, resolution="escalated",
                     identity_verified=self.session.verified_customer_id is not None,

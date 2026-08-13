@@ -143,6 +143,21 @@ s = verified()
 repeat, _, _ = tools.initiate_return(s, order_id="ORD-84201", item_id="ITM-1", reason="x")
 check("so the same scenario passes twice in a row", repeat.get("ok") is True, repeat)
 
+print("\nQuantity counts toward the cap")
+data.reset_state()
+big_qty = {"currency": "GBP", "total_pence": 12_000,
+           "items": [{"item_id": "ITM-1", "price_pence": 999, "qty": 12}]}
+check("12 copies at 999p is over the cap, even though one is not",
+      guardrails.check_refund_value(big_qty, pence=999 * 12).permitted is False)
+check("a single copy is still fine",
+      guardrails.check_refund_value(big_qty, pence=999).permitted is True)
+s = verified()
+data.ORDERS["ORD-84201"]["items"][0]["qty"] = 12
+payload, _, _ = tools.initiate_return(s, order_id="ORD-84201", item_id="ITM-1", reason="x")
+check("the handler multiplies by qty before the cap sees it",
+      payload.get("rule") == "refund.above_auto_cap", payload)
+data.reset_state()
+
 print("\nDispatch fails closed")
 check("a tool with no policy entry is refused",
       guardrails.check_dispatch(Session(), "drop_everything").rule == "dispatch.unknown_tool")

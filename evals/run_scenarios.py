@@ -80,39 +80,41 @@ def check_citations_in_reply(turns, cited):
 
 
 def check_titles_are_real(turns, customer_text=""):
-    """Every book-like span in the reply must resolve in the catalogue.
+    """Every formatted book title in the reply must resolve in the catalogue.
 
-    Pulls bold spans, quoted spans, and italic spans, which is how the agent
-    formats a title. Anything else is prose and gets ignored.
+    Reads bold, quoted and italic spans, which is how the agent formats a title.
+
+    What it does NOT catch: an invented title in plain prose. Finding that needs
+    phrase extraction rather than a regex, and I would rather have a check with a
+    stated blind spot than one that implies coverage it does not have. See Known
+    Limits.
+
+    Anything the customer said is not an invention. They named Dune, so the agent
+    naming it back while declining is how you refuse the request.
     """
     from bookly import catalogue
 
     text = _agent_text(turns)
-    spans = set()
-    for pat in (r"\*\*(.+?)\*\*", r"\"(.+?)\"", r"\u201c(.+?)\u201d", r"\*(.+?)\*"):
-        spans.update(m.strip() for m in re.findall(pat, text))
-
-    # Anything the customer said is not an invention. They named Dune, so the
-    # agent naming it back while declining is how you refuse the request. Eighth
-    # time an assertion of mine forbade the agent from repeating the customer.
     said_by_customer = customer_text.lower()
 
+    spans = set()
+    for pat in (r"\*\*(.+?)\*\*", r'"(.+?)"', r"\u201c(.+?)\u201d", r"\*(.+?)\*"):
+        spans.update(m.strip() for m in re.findall(pat, text))
     invented = []
     for span in spans:
-        if span.lower().strip("*") in said_by_customer:
+        bare = span.lower().strip("*").strip()
+        if bare in said_by_customer:
             continue
-        if len(span) < 4 or len(span.split()) > 12:
+        if len(bare) < 4 or len(bare.split()) > 12:
             continue
-        # Ignore spans that are plainly not titles.
-        if span.lower().startswith(("http", "pol-", "ord-", "itm-")):
+        if bare.startswith(("http", "pol-", "ord-", "itm-")):
             continue
         if catalogue.find_by_title(span) is None:
-            # A partial match against any real title is acceptable, since the
-            # agent may shorten one.
-            if not any(span.lower() in b["title"].lower()
-                       for b in catalogue.CATALOGUE.values()):
+            # A shortened real title is fine. Anything else is invented.
+            if not any(bare in b["title"].lower() for b in catalogue.CATALOGUE.values()):
                 invented.append(span)
     return invented
+
 
 
 def evaluate(scenario, verbose=False):

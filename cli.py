@@ -37,7 +37,7 @@ Second account: tom.whitfield@example.com / M1 4BT  -  ORD-84420 (GBP 342, above
 
 def print_trace(turn):
     for e in turn.tool_events:
-        colour = {"ok": GREEN, "refused": YELLOW, "error": RED}[e.outcome]
+        colour = {"ok": GREEN, "refused": YELLOW, "error": RED}.get(e.outcome, RESET)
         args = json.dumps(e.arguments) if e.arguments else "{}"
         print(f"  {DIM}->{RESET} {colour}{e.tool_name}{RESET} {DIM}{args}{RESET}")
         if e.guardrail:

@@ -18,7 +18,7 @@ pip install -r requirements.txt
 export ANTHROPIC_API_KEY=sk-ant-...
 
 python cli.py --trace                        # chat, with the tool calls shown
-python evals/test_control_layer.py           # 37 checks, no API key needed
+python evals/test_control_layer.py           # 46 checks, no API key needed
 python evals/run_scenarios.py --repeats 3    # 13 conversations, needs a key
 ```
 
@@ -73,7 +73,7 @@ policy.py      keyword retrieval with a relevance cutoff
 
 **The refund limits get a check in code as well as a line in the prompt.** Costs
 flexibility: a fair exception gets blocked and needs a person. Worth it because a
-refund does not come back, and 37 offline checks prove the limits hold without
+refund does not come back, and 46 offline checks prove the limits hold without
 spending anything on the API. The prompt still owns how the agent explains the
 refusal, which is the part that should change often.
 
@@ -96,7 +96,7 @@ call, so they are free, repeatable, and every suggestion carries a reason.
 
 ## Testing
 
-The permission layer gets 37 plain assertions and no API key, because none of it
+The permission layer gets 46 plain assertions and no API key, because none of it
 touches the model. The conversations get 13 scenarios, six of them attacks.
 Assertions read the trace rather than the wording of the reply, because the
 wording changes every run and the trace does not.
@@ -151,6 +151,15 @@ outlives a conversation.
 **Nothing survives the process.** Sessions are in memory, orders are a module dict,
 and every conversation appends to one trace file. No horizontal scaling story beyond
 sticky sessions.
+
+**The prompt and the caps are not config.** The prompt is a string literal in
+`agent.py` and the cap is a module constant, so only an engineer can change either.
+The business should author both and the code should resolve them. That is the change
+I would make first and the reason it is not done is scope, not disagreement.
+
+**No wall-clock deadline and no history trimming.** Worst case is eight rounds at a
+thirty second timeout, and the whole history is resent every round, so a long
+conversation gets slower and dearer as it goes.
 
 **Two races I know about and have not closed.** Duplicate returns are caught by a
 list on the order, so two workers reading it at the same time could both get

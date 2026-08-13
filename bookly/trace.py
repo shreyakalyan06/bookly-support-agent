@@ -75,7 +75,15 @@ class TurnTrace:
     # they might prefer. On a "handled without a human" metric those
     # look identical. One lost you a customer and one did not.
     recovery_offered: bool = False
+    # Set when the turn ended because something broke on our side rather than
+    # because the agent decided to hand over. Kept apart from escalation, because
+    # a network blip should not disable the refund path.
+    technical_failure: str = ""
     agent_message: str = ""
+    # Set when a turn ended because something broke on our side rather than because
+    # the agent chose to hand over. Kept apart from escalation, because a network
+    # blip should not disable the refund path for the rest of the conversation.
+    technical_failure: str = ""
 
     def as_dict(self):
         d = asdict(self)

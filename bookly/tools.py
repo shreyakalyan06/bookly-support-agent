@@ -109,9 +109,7 @@ TOOL_SCHEMAS = [
             "what to read, has finished something, didn't get on with a book, or asks what "
             "else you have.\n\n"
             "Give `liked_title` when they name a book they enjoyed. Give `mood` or `themes` "
-            "when they describe what they're after rather than naming something. If the "
-            "customer is verified you may pass use_purchase_history to draw on what they have "
-            "already bought.\n\n"
+            "when they describe what they're after rather than naming something.\n\n"
             "You may only recommend books this tool returns. Never suggest a title from your "
             "own knowledge, even if you are confident Bookly stocks it, a recommendation for "
             "something we cannot sell creates a support problem rather than solving one."
@@ -131,10 +129,6 @@ TOOL_SCHEMAS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Subjects of interest, e.g. cats, memory, myth retelling, court politics.",
-                },
-                "use_purchase_history": {
-                    "type": "boolean",
-                    "description": "Base suggestions on this customer's previous orders. Requires verification.",
                 },
                 "shop_cat_picks_only": {
                     "type": "boolean",
@@ -307,6 +301,10 @@ def get_order(session: Session, order_id: str = "", **_):
                 "surfaced_constraint": (
                     returnable.rule if not returnable.permitted else None
                 ),
+                # Dates and status are order level, but "already returned" is per
+                # item, so name the items rather than implying the whole order is
+                # or is not returnable.
+                "already_returned": list(order.get("returned_item_ids", [])),
             },
         },
         gate.as_dict(),
@@ -336,7 +334,8 @@ def search_policy(session: Session, query: str = "", **_):
     return (
         {
             "ok": True,
-            "found": True,
+            "ok": True,
+        "found": True,
             "passages": hits,
             "instruction": "Answer only from these passages and cite the passage_id you used.",
         },
@@ -374,7 +373,7 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
         d = guardrails.Decision(False, "ownership.mismatch", NOT_FOUND)
         return _refusal(d), d.as_dict(), []
     decision = guardrails.authorise_return(
-        session, order, item_id=item_id, pence=item["price_pence"]
+        session, order, item_id=item_id, pence=item["price_pence"] * item.get("qty", 1)
     )
 
     if not decision.permitted:
@@ -394,7 +393,8 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
 
     session.actions_taken.append(
         {"action": "initiate_return", "order_id": order_id, "item_id": item_id,
-         "reason": reason, "pence": item["price_pence"]}
+         "reason": reason,
+         "pence": item["price_pence"] * item.get("qty", 1)}
     )
 
     return (
@@ -402,8 +402,10 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
             "ok": True,
             "return_reference": f"RET-{order_id.split('-')[1]}-{item_id.split('-')[1]}",
             "item_title": item["title"],
-            "refund_pence": item["price_pence"],
-            "refund_amount": guardrails.pounds(item["price_pence"]),
+            "refund_pence": item["price_pence"] * item.get("qty", 1),
+            "refund_amount": guardrails.pounds(
+                item["price_pence"] * item.get("qty", 1)
+            ),
             "currency": order["currency"],
             "next_step": "A prepaid Royal Mail return label has been emailed to the customer.",
             "recorded_reason": reason,
@@ -434,7 +436,6 @@ def recommend_books(
     liked_title: str = "",
     mood: str = "",
     themes=None,
-    use_purchase_history: bool = False,
     shop_cat_picks_only: bool = False,
     **_,
 ):
@@ -454,38 +455,6 @@ def recommend_books(
     already_owned = set()
     seed_books = []
     basis = []
-
-    # Using purchase history means reading their orders, so this needs identity
-    # verification even though recommendations normally do not.
-    #
-    # The risk level follows the DATA being touched, not the name of the tool.
-    # Same function, two different risk levels, depending on the arguments.
-    if use_purchase_history:
-        gate = guardrails.check_identity(session, "find_orders")
-        if not gate.permitted:
-            return (
-                {
-                    "ok": False,
-                    "refused": True,
-                    "rule": gate.rule,
-                    "reason": "Cannot use purchase history before verifying the customer.",
-                    "instruction": (
-                        "You can still recommend without history. Ask what they last enjoyed, "
-                        "or what mood they're after."
-                    ),
-                },
-                gate.as_dict(),
-                [],
-            )
-        for order in data.get_orders_for_customer(session.verified_customer_id):
-            for item in order["items"]:
-                book = catalogue.find_by_title(item["title"])
-                if book:
-                    already_owned.add(book["book_id"])
-                    seed_books.append(book)
-        if seed_books:
-            basis.append("previous orders")
-
     if liked_title:
         seed = catalogue.find_by_title(liked_title)
         if seed is None:
@@ -582,7 +551,8 @@ def recommend_books(
     return (
         {
             "ok": True,
-            "found": True,
+            "ok": True,
+        "found": True,
             "basis": basis,
             "recommendations": results,
             "instruction": (
