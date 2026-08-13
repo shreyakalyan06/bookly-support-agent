@@ -25,8 +25,6 @@ import os
 import re
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
 
 # Without this, piping the output to another command makes Python hold it back
 # until the end, so a long run looks like it has frozen.
@@ -333,14 +331,6 @@ def main():
     parser.add_argument("--only", type=str, default=None)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--json", type=str, default=None, help="Write results to a JSON file.")
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=4,
-        help="Scenarios to run concurrently. Each scenario is an independent "
-             "conversation with its own session, so this is safe. Drop to 1 if you "
-             "hit API rate limits.",
-    )
     args = parser.parse_args()
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -364,23 +354,20 @@ def main():
             )
 
     print(f"  {len(selected)} scenarios x {args.repeats} repeats = "
-          f"{len(selected) * args.repeats} runs, {args.workers} at a time. Real API calls.")
+          f"{len(selected) * args.repeats} runs, one at a time. Real API calls.")
     if args.json:
         print(f"  results written to {args.json} after each scenario, so Ctrl+C is safe.")
     print()
 
     interrupted = False
-    lock = Lock()
     started = time.time()
 
-    # Run several scenarios at once. Each one builds its own agent and its own
-    # session, so they cannot affect each other. This changes how long the suite
-    # takes, not what it measures. Run one at a time, almost all of it is just
-    # waiting for the network.
+    # Sequential. Parallel runs needed a thread-local copy of the order data, and
+    # that copy was what let the same refund succeed once per worker. Slower and
+    # honest beats fast and wrong.
     jobs = [(run, sc) for run in range(args.repeats) for sc in selected]
 
     def record(scenario, passed, failures, transcript, source, elapsed):
-        with lock:
             rec = tally[scenario["id"]]
             rec["runs"] += 1
             rec["passes"] += int(passed)
@@ -412,15 +399,11 @@ def main():
         return scenario, passed, failures, transcript, source, time.time() - t0
 
     try:
-        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
-            futures = [pool.submit(run_one, job) for job in jobs]
-            for fut in as_completed(futures):
-                record(*fut.result())
-
+        for job in jobs:
+            record(*run_one(job))
     except KeyboardInterrupt:
         interrupted = True
-        print(f"\n\n  {YELLOW}interrupted{RESET} -- partial results kept below and in the JSON file.")
-        print(f"  {DIM}in-flight scenarios may take a few seconds to stop{RESET}")
+        print(f"\n  {YELLOW}interrupted, keeping what has run so far{RESET}")
 
     print(f"\n{BOLD}Summary{RESET}")
     if interrupted:

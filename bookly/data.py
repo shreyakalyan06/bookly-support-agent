@@ -274,68 +274,22 @@ def get_order(order_id: str):
     return ORDERS.get((order_id or "").strip().upper())
 
 
-# Why each test run gets its own copy of the orders
-#
-# When a return succeeds, we mark the order so a second attempt is blocked. That
-# is correct, and it is tested. But it means the order data CHANGES.
-#
-# The test runner runs scenarios in parallel to save time, and ORDERS was one
-# shared dictionary. So the first run succeeded, marked the order, and the other
-# two were told "a return is already in progress". The test came out at exactly
-# 1 out of 3, every time.
-#
-# It looked exactly like the agent failing. It was the test setup.
-#
-# Now each parallel worker gets its own copy and they cannot tread on each
-# other. In a real system this layer would be a database, and the equivalent fix
-# is undoing the changes after every test.
-
-import copy
-import threading
-
-_local = threading.local()
+ORDERS = dict(_ORDER_FIXTURES)
 
 
-def _orders() -> dict:
-    if not hasattr(_local, "orders"):
-        _local.orders = copy.deepcopy(_ORDER_FIXTURES)
-    return _local.orders
+def reset_state() -> None:
+    """Restore the fixtures. Tests call this between cases.
+
+    An earlier version gave each thread its own deep copy so the eval runner could
+    execute scenarios in parallel. That solved a harness problem and created a real
+    one: the duplicate-return guard reads this dict, so N workers meant N refunds
+    for the same item. The runner is sequential now and this is a plain dict.
+
+    A real deployment has a database and this file does not exist.
+    """
+    ORDERS.clear()
+    ORDERS.update({k: {**v, "items": [dict(i) for i in v["items"]]}
+                   for k, v in _ORDER_FIXTURES.items()})
 
 
-def reset_state():
-    """Restore pristine order data for the current thread."""
-    _local.orders = copy.deepcopy(_ORDER_FIXTURES)
-
-
-class _OrderStore:
-    """Dict-like view onto this thread's orders, so `ORDERS[...]` still works."""
-
-    def __getitem__(self, key):
-        return _orders()[key]
-
-    def __setitem__(self, key, value):
-        _orders()[key] = value
-
-    def __contains__(self, key):
-        return key in _orders()
-
-    def get(self, key, default=None):
-        return _orders().get(key, default)
-
-    def values(self):
-        return _orders().values()
-
-    def items(self):
-        return _orders().items()
-
-    def keys(self):
-        return _orders().keys()
-
-    def __iter__(self):
-        return iter(_orders())
-
-    def __len__(self):
-        return len(_orders())
-
-
-ORDERS = _OrderStore()
+reset_state()

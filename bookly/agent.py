@@ -33,6 +33,9 @@ from .guardrails import Session
 from .tools import HANDLERS, TOOL_SCHEMAS
 from .trace import ToolEvent, Tracer
 
+# Pin a dated snapshot here before quoting any number from the eval suite. This
+# is the alias, which moves, so the committed results are only reproducible until
+# it does. Check the current snapshot names in the Anthropic docs.
 MODEL = os.environ.get("BOOKLY_MODEL", "claude-sonnet-5")
 
 # A confused AI can get stuck asking for the same thing over and over. Every
@@ -41,9 +44,15 @@ MODEL = os.environ.get("BOOKLY_MODEL", "claude-sonnet-5")
 # Eight leaves room for one retry.
 MAX_ITERATIONS = 8
 
-# One retry on a transient failure, and a ceiling on how long a customer waits.
+# One attempt with a ceiling on how long a customer waits. An earlier version
+# retried once, which meant eight rounds times two attempts times thirty seconds
+# was eight minutes on a single message. A retry belongs behind a wall-clock
+# deadline, and that is not in scope here.
 API_TIMEOUT_SECONDS = 30.0
-RETRY_DELAY_SECONDS = 1.0
+
+# Zero, so a rerun of the eval suite measures a change in the code rather than
+# a change in the sampling.
+TEMPERATURE = 0.0
 
 
 SYSTEM_PROMPT = """You are the Bookly customer support assistant. Bookly is an online bookstore in the UK.
@@ -91,7 +100,7 @@ This matters most when you have had to say no. A refusal that ends the conversat
 
 So: if you refuse a return because the window has closed, that customer still has a book they didn't get on with. Offer something they might prefer, or a group discussing that book. If someone is returning a book because it wasn't what they expected, find out what they were hoping for. If a delivery is late, the wait is more bearable with something to look forward to.
 
-Use `recommend_books` and `find_book_clubs` for this. You may only mention titles and clubs those tools return. Never invent a book, a club, a meeting date or a member count — a recommendation for something Bookly cannot sell creates a support ticket instead of closing one.
+Use `recommend_books` for this. You may only mention titles the tool returns. Never invent a book. A recommendation for something Bookly cannot sell creates a support ticket instead of closing one.
 
 Read the room. A furious customer wants their problem fixed and nothing else. Someone browsing is glad of a suggestion. If in doubt, resolve the problem and stop.
 
@@ -151,18 +160,15 @@ class BooklyAgent:
         #   v2: checked for "?" anywhere. Also wrong, and worse: now every
         #       "anything else I can help with?" counted. The fix broke more
         #       than it mended.
-        #   v3: stop reading the words. Look at what happened instead. If a tool
-        #       came back with a real result, the agent made progress and any
-        #       question is just politeness. Only if nothing moved AND it asked
-        #       something is it actually stuck.
-        #
-        # The lesson: judge the system by what it did, not by what it said.
+        #   v3: lead with what happened. If a tool came back with a real result the
+        #       agent made progress, so any question is politeness. Only when
+        #       nothing moved do we look at the text at all, and then a question
+        #       mark is the signal. English only, which is a real limit.
         SUBSTANTIVE = {
             "find_orders",
             "get_order",
             "search_policy",
             "recommend_books",
-            "find_book_clubs",
         }
         made_progress = any(
             e.tool_name in SUBSTANTIVE and e.outcome == "ok" for e in turn.tool_events
@@ -173,28 +179,16 @@ class BooklyAgent:
         return "answered"
 
     def _call_model(self):
-        """One API call, with a timeout and a single retry.
-
-        A transient network failure should not end a customer's conversation, and
-        an indefinite hang should not hold the line open either.
-        """
-        last = None
-        for attempt in (1, 2):
-            try:
-                return self.client.messages.create(
-                    model=MODEL,
-                    max_tokens=1024,
-                    system=SYSTEM_PROMPT,
-                    tools=TOOL_SCHEMAS,
-                    messages=self.messages,
-                    timeout=API_TIMEOUT_SECONDS,
-                )
-            except Exception as exc:  # noqa: BLE001
-                last = exc
-                if attempt == 2:
-                    raise
-                time.sleep(RETRY_DELAY_SECONDS)
-        raise last  # unreachable, kept explicit
+        """One API call, with a timeout. No retry, deliberately: see the note above."""
+        return self.client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            temperature=TEMPERATURE,
+            system=SYSTEM_PROMPT,
+            tools=TOOL_SCHEMAS,
+            messages=self.messages,
+            timeout=API_TIMEOUT_SECONDS,
+        )
 
     def _run_tool(self, turn, name: str, arguments: dict):
         # Policy first, before the handler exists as far as this method cares.

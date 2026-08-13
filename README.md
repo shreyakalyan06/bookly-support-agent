@@ -15,7 +15,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 python cli.py --trace                        # chat, with the tool calls shown
 python evals/test_control_layer.py           # 37 checks, no API key needed
-python evals/run_scenarios.py --repeats 3    # 14 conversations, needs a key
+python evals/run_scenarios.py --repeats 3    # 13 conversations, needs a key
 ```
 
 | Customer | Credentials | Orders |
@@ -92,9 +92,10 @@ everything and one claiming to have acted while touching nothing, must be reject
 by every attack scenario. When I first ran it, five passed the do-nothing stub:
 they checked that nothing bad happened without checking anything happened at all.
 
-The recovery offer is not asserted anywhere, because nothing enforces it. It
-appeared in one run of three. That is the argument for moving it into code rather
-than a reason to loosen a test.
+The recovery offer is not asserted anywhere, because nothing enforces it. Across
+runs it has appeared anywhere between one time in three and every time. That
+spread is the argument for moving it into code rather than a reason to loosen a
+test.
 
 Assertions of mine failed a correct agent eight times and had to change. Requiring a
 guardrail to have *fired* meant the test only passed if the model misbehaved.
@@ -107,6 +108,11 @@ know from the data. And an assertion naming one correct path will eventually mee
 the other one, which happened to me eight times.
 
 Results in `evals/results/`.
+
+**On the score.** Thirteen scenarios at three repeats is 39 runs. A clean sweep of
+39 puts the upper bound on the true failure rate somewhere near 15%, so it licenses
+"no failures observed in 39 runs" and nothing stronger. The offline checks are a
+different kind of claim: they hold by construction, not by sampling.
 
 ## Known limits
 
@@ -123,7 +129,23 @@ The refund cap is per decision, not per customer. Four separate £75 refunds eac
 pass it. A rolling total keyed by customer closes that, and needs a store that
 outlives a conversation.
 
-English only, UK only. No memory between conversations.
+**Nothing survives the process.** Sessions are in memory, orders are a module
+dict, and every conversation appends to one trace file. There is no horizontal
+scaling story beyond sticky sessions.
+
+**`escalate_to_human` records a handoff, it does not enforce one.** The agent keeps
+taking turns afterwards. Gating irreversible tools on it is a three line change I
+left out rather than add another half-built feature.
+
+**The worst case is eight rounds at a thirty second timeout**, so four minutes on
+one message. A wall clock deadline per message is what production needs.
+
+**The model string is an alias, not a dated snapshot**, so the committed numbers
+are reproducible only until the alias moves. Temperature is zero.
+
+Date fixtures are computed at import while the checks call `date.today()`, so a
+process running for a month drifts. English only, UK only. No memory between
+conversations.
 
 ## What I would change first
 
@@ -132,7 +154,9 @@ and offers an alternative after a refusal. Both hold today, and so did the refun
 instruction. I trust the refund rule because `guardrails.py` enforces it.
 
 Then replay real conversations rather than my thirteen invented ones, since eight
-of my assertions were wrong. Then the per-customer refund total. Then gate releases on the
+of my assertions were wrong. Then a durable store, which gives cross-conversation
+verification, a rolling per-customer refund total, and a trace that survives a
+restart, all from the same change. Then the per-customer refund total. Then gate releases on the
 attack score.
 
 All of that before new capability. Behaviour varies between runs, so without

@@ -1,7 +1,7 @@
 """
 The list of things the AI is allowed to ask for, and the code that does them.
 
-Two halves. TOOL_SCHEMAS is the menu we hand the AI: eight jobs, each with a
+Two halves. TOOL_SCHEMAS is the menu we hand the model: seven jobs, each with a
 description and the information it must supply. HANDLERS is what actually runs
 when it asks.
 
@@ -192,7 +192,7 @@ def _refusal(decision: Decision):
 
 
 def verify_customer(session: Session, email: str = "", postcode: str = "", **_):
-    attempts_ok = guardrails.check_verification_attempts(session, email=email)
+    attempts_ok = guardrails.check_verification_attempts(session)
     if not attempts_ok.permitted:
         return _refusal(attempts_ok), attempts_ok.as_dict(), []
 
@@ -282,9 +282,6 @@ def get_order(session: Session, order_id: str = "", **_):
         )
 
     returnable = guardrails.check_returnable(order)
-    # No item chosen yet, so this checks the order total. Conservative on
-    # purpose: it flags a possible approval step before the customer picks.
-    value = guardrails.check_refund_value(order)
 
     return (
         {
@@ -298,23 +295,18 @@ def get_order(session: Session, order_id: str = "", **_):
                 "returnable": returnable.permitted,
                 "rule": returnable.rule,
                 "reason": returnable.reason,
-                # Telling the AI up front means it can decline politely
-                # instead of trying and being blocked. If it tried anyway,
-                # authorise_return would still stop it. Two safety nets.
-                # Tell the AI about both possible blockers, not just the date.
+                # Tell the model the date constraint up front, so it declines
+                # politely instead of trying and being blocked. If it tried
+                # anyway, authorise_return still stops it. Two safety nets.
                 #
-                # First version only mentioned the return window. So a £342
-                # order bought last week looked completely fine, the AI would
-                # try to refund it, get refused, and the customer would watch
-                # the system trip over itself. Now it knows up front and can say
-                # "a colleague needs to approve this" before trying.
+                # The value cap is NOT surfaced here. No item is chosen yet, so
+                # the refund amount is unknown, and an earlier version fell back
+                # to the order total. That told the customer a £342 order needed
+                # approval, then happily refunded one £14.99 book from it. A
+                # claim you contradict two turns later is worse than no claim.
                 "surfaced_constraint": (
-                    returnable.rule
-                    if not returnable.permitted
-                    else (value.rule if not value.permitted else None)
+                    returnable.rule if not returnable.permitted else None
                 ),
-                "requires_human_approval": not value.permitted,
-                "value_note": value.reason,
             },
         },
         gate.as_dict(),
@@ -392,7 +384,7 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
         payload = _refusal(decision)
         # Both value rules mean "not by me", not "never". Without this the model
         # reads refused and tells the customer no, which is wrong and loses them.
-        if decision.rule in ("refund.above_auto_cap", "refund.above_customer_cap"):
+        if decision.rule == "refund.above_auto_cap":
             payload["next_step"] = "escalate_to_human"
             payload["customer_facing_note"] = (
                 "This refund needs a colleague to approve it because of the "
@@ -402,8 +394,6 @@ def initiate_return(session: Session, order_id: str = "", item_id: str = "", rea
 
     # Mutate the mock store so the duplicate-return guard is real on a second attempt.
     order["return_status"] = "in_progress"
-    # Only count money that actually moved. Written here, read by
-    # check_refund_value on the next attempt in this conversation.
 
     session.actions_taken.append(
         {"action": "initiate_return", "order_id": order_id, "item_id": item_id,
@@ -609,8 +599,9 @@ def recommend_books(
 
 
 def escalate_to_human(session: Session, reason: str = "", summary: str = "", **_):
-    # Gates initiate_return from here on. See TOOL_POLICY. Once a person owns the
-    # conversation the agent must not still be moving money behind them.
+    # Recorded so the trace shows the handoff. It does not gate anything: the
+    # agent keeps taking turns after this, which a real deployment would stop.
+    # See Known Limits.
     session.escalated = True
     return (
         {

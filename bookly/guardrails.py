@@ -41,11 +41,6 @@ def pounds(pence: int) -> str:
 IDENTITY_REQUIRED_FOR = {"find_orders", "get_order", "initiate_return"}
 
 
-def pounds(pence: int) -> str:
-    """Format pence for a human. Presentation only, never arithmetic."""
-    return f"{pence / 100:.2f}"
-
-
 # Tiered authority, sorted by recoverability.
 #
 #   Tier 0  informational   no gate      mistake costs a correction
@@ -193,7 +188,7 @@ def check_ownership(session: Session, order: dict) -> Decision:
     return Decision(True, "ownership.ok", "Order belongs to the verified customer.")
 
 
-def check_verification_attempts(session: Session, email: str = "") -> Decision:
+def check_verification_attempts(session: Session) -> Decision:
     """
     Stop someone guessing postcodes until one works.
 

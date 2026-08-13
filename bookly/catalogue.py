@@ -1,5 +1,5 @@
 """
-The books we sell and the reading groups we run.
+The books we sell.
 
 This file exists to show the other side of the design. Refunds are locked down
 because they cannot be undone. Book suggestions have no checks at all, because a

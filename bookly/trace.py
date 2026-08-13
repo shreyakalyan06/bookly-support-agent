@@ -72,7 +72,7 @@ class TurnTrace:
     #
     # Kept as its own field for a reason. Two conversations both refuse a
     # return. One customer leaves annoyed; the other gets two book suggestions
-    # and a reading group. On a normal "handled without a human" metric those
+    # they might prefer. On a "handled without a human" metric those
     # look identical. One lost you a customer and one did not.
     recovery_offered: bool = False
     agent_message: str = ""
