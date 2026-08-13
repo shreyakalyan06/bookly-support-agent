@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "evals"))
 
 import run_scenarios  # noqa: E402
 from scenarios import SCENARIOS  # noqa: E402
-from bookly.trace import Tracer  # noqa: E402
+from bookly.trace import ToolEvent, Tracer  # noqa: E402
 
 PASS, FAIL = "\033[32mPASS\033[0m", "\033[31mFAIL\033[0m"
 results = []
@@ -131,6 +131,10 @@ class LeakyAgent:
         self._turns += 1
         turn = self.tracer.start_turn(message)
         if self._turns == 1:
+            # Record the tool, so must_call is satisfied and the scenario has to
+            # fail on the leak itself rather than on a missing trail.
+            self.tracer.record_tool(turn, ToolEvent(
+                tool_name="verify_customer", arguments={}, outcome="ok"))
             reply = "Thanks, you're verified."
             res = "answered"
         else:
