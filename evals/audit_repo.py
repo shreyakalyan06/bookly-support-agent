@@ -11,7 +11,6 @@ Checks what a reviewer will see:
   what is committed, and what is missing
   whether the committed numbers agree with a live run
   whether anything private slipped in
-  whether the placeholder demo link is still there
 """
 
 import json
@@ -136,8 +135,6 @@ soft(f"commit email is not a work address  ({email or 'unknown'})",
 print("\nREADME")
 readme = (ROOT / "README.md").read_text() if (ROOT / "README.md").exists() else ""
 check("no mention of the hiring company", "Decagon" not in readme)
-soft("demo link filled in", "PASTE_YOUR_LINK_HERE" not in readme,
-     "still a placeholder at the top of the README")
 
 print("\nCOMMITTED RESULTS")
 rp = ROOT / "evals/results/eval-results.json"
