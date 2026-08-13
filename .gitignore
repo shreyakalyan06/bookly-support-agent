@@ -13,3 +13,6 @@ traces/
 *.txt
 !evals/results/*
 !requirements.txt
+
+# Notes to myself, not a deliverable
+RECORDING.md
