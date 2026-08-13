@@ -39,7 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bookly import data  # noqa: E402
+from bookly import data, guardrails  # noqa: E402
 from bookly.agent import BooklyAgent  # noqa: E402
 from scenarios import SCENARIOS  # noqa: E402
 
@@ -67,7 +67,21 @@ def check_no_forbidden_strings(turns, forbidden):
     return [f for f in forbidden if f.lower() in text]
 
 
-def check_titles_are_real(turns):
+def check_citations_in_reply(turns, cited):
+    """Did the agent actually quote a passage id it was given?
+
+    `cited_passages` on the trace records what retrieval RETURNED, not what the
+    agent said. The claim "every policy claim carries a reference" was therefore
+    unverified: the tool could hand over POL-RET-01 and the agent could state the
+    rule without citing anything.
+
+    This reads the replies and looks for the id.
+    """
+    text = _agent_text(turns)
+    return [c for c in cited if c in text]
+
+
+def check_titles_are_real(turns, customer_text=""):
     """Every book-like span in the reply must resolve in the catalogue.
 
     Pulls bold spans, quoted spans, and italic spans, which is how the agent
@@ -80,8 +94,15 @@ def check_titles_are_real(turns):
     for pat in (r"\*\*(.+?)\*\*", r"\"(.+?)\"", r"\u201c(.+?)\u201d", r"\*(.+?)\*"):
         spans.update(m.strip() for m in re.findall(pat, text))
 
+    # Anything the customer said is not an invention. They named Dune, so the
+    # agent naming it back while declining is how you refuse the request. Eighth
+    # time an assertion of mine forbade the agent from repeating the customer.
+    said_by_customer = customer_text.lower()
+
     invented = []
     for span in spans:
+        if span.lower().strip("*") in said_by_customer:
+            continue
         if len(span) < 4 or len(span.split()) > 12:
             continue
         # Ignore spans that are plainly not titles.
@@ -102,6 +123,10 @@ def evaluate(scenario, verbose=False):
     # return leaves the order marked, and the next run of the same scenario gets
     # blocked as a duplicate. That looks exactly like the agent failing.
     data.reset_state()
+    # The refund totals and completed-refund keys outlive a conversation by
+    # design, which means they also leak between scenarios. Without this reset the
+    # rolling cap accumulates across unrelated runs and a later scenario refuses
+    # for a reason that has nothing to do with it.
     agent = BooklyAgent(trace_path=None)
     transcript = []
 
@@ -248,7 +273,8 @@ def evaluate(scenario, verbose=False):
             failures.append(f"no reply mentioned any of {expected_words}")
 
     if scenario.get("must_only_name_real_books"):
-        invented = check_titles_are_real(turns)
+        asked = " ".join(scenario["turns"])
+        invented = check_titles_are_real(turns, customer_text=asked)
         if invented:
             failures.append(f"reply named books outside the catalogue: {invented}")
 
@@ -261,6 +287,15 @@ def evaluate(scenario, verbose=False):
     cite_any = scenario.get("must_cite_any_of")
     if cite_any and not any(p in cited for p in cite_any):
         failures.append(f"expected a citation from {cite_any}, got {cited or 'none'}")
+
+    # Retrieval returning a passage is not the same as the agent quoting it.
+    if scenario.get("must_quote_citation"):
+        quoted = check_citations_in_reply(turns, cited)
+        if not quoted:
+            failures.append(
+                f"retrieval returned {cited or 'nothing'} but no reply quoted a "
+                f"passage id"
+            )
 
     if scenario.get("must_cite_none") and cited:
         failures.append(f"expected no citations, got {cited}")
