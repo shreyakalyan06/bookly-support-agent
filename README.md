@@ -6,6 +6,10 @@ There are 2 support jobs end to end: where is my order, and I want to send this 
 refund included. It also answers policy questions and suggests a book after
 declining a return.
 
+## Screen recording of a test run
+
+https://github.com/user-attachments/assets/c948e073-0db6-4d71-944c-4a207c364db2
+
 ## Run it
 
 Python 3.10 or newer.
