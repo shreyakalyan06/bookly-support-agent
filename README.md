@@ -1,11 +1,8 @@
 # Bookly support agent
 
-A support agent for a fictional online bookshop. Python, calling the Anthropic API
-directly. The loop is hand-rolled because the brief asked for it and because it
-keeps the orchestration visible for review. In production a platform owns the loop
-and I own the procedures, the tools and the checks.
+A support agent for a fictional online bookshop. It runs on Python and calls the Anthropic API directly. I wrote the loop by hand because the brief asked to avoid frameworks. In production a platform owns the loop and an engineer will own the procedures, the tools and the checks.
 
-Two support jobs end to end: where is my order, and I want to send this back,
+There are 2 support jobs end to end: where is my order, and I want to send this back,
 refund included. It also answers policy questions and suggests a book after
 declining a return.
 
@@ -21,6 +18,7 @@ python cli.py --trace                        # chat, with the tool calls shown
 python evals/test_control_layer.py           # 56 checks, no API key needed
 python evals/run_scenarios.py --repeats 3    # 14 conversations, needs a key
 ```
+# Test customers and their orders.
 
 | Customer | Credentials | Orders |
 |---|---|---|
@@ -33,20 +31,18 @@ agent has to ask.
 ## The design
 
 Most of what a support agent does belongs in plain English. The tone, the
-sequencing, when to ask instead of act, how to recover from a no. Those change
+sequencing, when to ask instead of act, how to recover from a no. These change
 weekly and a support manager should change them without waiting for a deploy.
 
-The line is drawn by reversibility, not by how much you trust the model. Anything
-irreversible gets a check in code as well, because a limit written in text is a
+The line is drawn by reversibility as opposed to how much you trust the model. Anything
+irreversible gets a check in code as well because a limit written in text is a
 request and a customer will push on it.
 
 The model picks what to attempt. `guardrails.py` decides whether it is allowed.
 That file imports nothing to do with the model and never reads the conversation,
 so no wording a customer chooses changes its answer.
 
-`agent.py` checks `guardrails.TOOL_POLICY` before calling any handler. A tool
-absent from that table is refused, so a new tool fails closed. A test walks both
-tables and fails on any mismatch.
+`agent.py` checks `guardrails.TOOL_POLICY` before calling any handler. Iff a tool is missing from that table, agent.py refuses it, so a new tool fails closed. A test walks both tables and fails on any mismatch
 
 Actions are sorted by one question: if this goes wrong, does it reverse?
 
@@ -56,8 +52,7 @@ Actions are sorted by one question: if this goes wrong, does it reverse?
 | 1 | order list, order detail | identity verified | another customer's data |
 | 2 | returns and refunds | four checks, £100 cap | money, and it does not come back |
 
-Closing the refund path is what lets tier 0 stay open. There is deliberately no
-check on recommendations, and a comment in `guardrails.py` says why.
+Closing the refund path is what lets tier 0 stay open. Recommendations get no check on purpose.
 
 ```
 agent.py       the loop, hand-rolled tool calling, 8 rounds maximum
@@ -72,18 +67,16 @@ policy.py      keyword retrieval with a relevance cutoff
 ## Three decisions and what they cost
 
 **The refund limits get a check in code as well as a line in the prompt.** Costs
-flexibility: a fair exception gets blocked and needs a person. Worth it because a
+flexibility: a fair exception gets blocked and needs a person. It is worth it because a
 refund does not come back, and 56 offline checks prove the limits hold without
 spending anything on the API. The prompt still owns how the agent explains the
-refusal, which is the part that should change often.
+refusal. 
 
-**The agent quotes policy only after retrieving it, and cites the passage.**
-Deflection drops and resolved-correctly rises, so you pick which one you report.
-Worth it because without a cutoff there is always a least bad match, and a gift
-card passage will confidently answer a question about loyalty points.
+**The agent quotes policy only after retrieving the passage, and cites the passage.**
+Deflection drops and resolved-correctly rises. Worth it because without a cutoff there is always a least bad match, and a gift card passage will confidently answer a question about loyalty points.
 
-**An unclear request gets a question, never a guess.** Costs one extra message.
-Worth it because guessing right usually means cancelling the wrong order sometimes.
+**An unclear request gets a question and not a guess.** That just costs one extra message.
+it is worth it because guessing right usually means cancelling the wrong order sometimes.
 
 Two smaller ones. Chat rather than voice, because in four hours voice spends the
 budget on speech handling instead of on the permission design. The tool layer, the
@@ -91,7 +84,7 @@ permission layer and the trace do not care about the channel. Voice changes the
 transport, the latency budget, and reading an irreversible action back before doing
 it. It does not change any of the checks.
 
-Recommendations are weighted arithmetic on theme and mood rather than a second model
+Recommendations use weighted arithmetic on theme and mood instead than a second model
 call, so they are free, repeatable, and every suggestion carries a reason.
 
 ## Testing
@@ -103,21 +96,21 @@ wording changes every run and the trace does not.
 
 `test_eval_suite.py` is a negative control. Two stub agents, one refusing
 everything and one claiming to have acted while touching nothing, must be rejected
-by every attack scenario. When I first ran it, five passed the do-nothing stub:
+by every attack scenario. When I first ran it, five scenarios passed the stub that did nothing.
 they checked that nothing bad happened without checking anything happened at all.
 
-The recovery offer is not asserted anywhere, because nothing enforces it. Across
+No assertion covers the recovery offer as nothing enforces it. Across
 runs it has appeared anywhere between one time in three and every time. That
-spread is the argument for moving it into code rather than a reason to loosen a
+spread argues well for moving it into code rather than a reason to loosen a
 test.
 
-Assertions of mine failed a correct agent eight times and had to change. Requiring a
+Amy own assertions failed a correct agent eight times and had to change. Requiring a
 guardrail to have *fired* meant the test only passed if the model misbehaved.
 Requiring `find_orders`, then `get_order`, then `escalate_to_human` each ruled out
 a second correct path. Refusing without a lookup, or asking for the reference
 instead of listing everything, discloses less and is better service.
 Forbidding "your husband", then "Dune", then any bold title the customer had named,
-all forbade the agent from repeating the customer back. Two rules came out of that. A forbidden string must be one the agent could only
+all forbade the agent from repeating the customer back. This resulted in 2 new rules. A forbidden string must be one the agent could only
 know from the data. And an assertion naming one correct path will eventually meet
 the other one, which happened to me eight times.
 
